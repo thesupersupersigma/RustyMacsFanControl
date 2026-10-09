@@ -1,0 +1,29 @@
+# Original Macs Fan Control install (proprietary binaries, signed driver, translations)
+/MacsFanControl/
+
+# Material extracted from the original app (icons, XML tables, English strings).
+# Regenerate locally with re/scripts/rcc_extract.py from your own install.
+/app/assets/
+
+# Reverse-engineering output: decompiled code, string dumps, Ghidra databases
+/re/out/
+/re/ghidra/
+/ghidra/
+/*.gpr
+/*.rep/
+*.lock~
+
+# Third-party tooling checked out locally (has its own repository)
+/tools/
+
+# Rust build output
+target/
+
+# Local editor / agent state
+.claude/
+.vscode/
+.idea/
+*.log
+
+# Scratch files from spec-writing passes
+/re/spec/parts/
