@@ -95,6 +95,34 @@ impl Model {
         }
     }
 
+    /// iMacs whose fans are pinned to minimum for sleep and left forced at logoff.
+    pub fn is_legacy_imac(&self) -> bool {
+        self.family == Family::IMac
+            && ((101..=122).contains(&self.number)
+                || matches!(self.number, 132 | 142 | 151 | 171 | 183 | 192))
+    }
+
+    /// Laptops that are left on automatic control during sleep.
+    pub fn skips_sleep_profile(&self) -> bool {
+        match self.family {
+            Family::MacBookAir => self.number == 81,
+            Family::MacBookPro => {
+                matches!(self.number, 121 | 131 | 132 | 141 | 142 | 152 | 162 | 163)
+                    || self.number >= 171
+            }
+            _ => false,
+        }
+    }
+
+    /// Laptops whose SMC needs a nudge on battery to keep reporting fan data.
+    pub fn needs_wake_workaround(&self) -> bool {
+        match self.family {
+            Family::MacBookPro => self.number == 121,
+            Family::MacBookAir => matches!(self.number, 62 | 71 | 72),
+            _ => false,
+        }
+    }
+
     /// Macs with a T2 chip, whose SMC is only reachable through the applesmc driver.
     pub fn is_t2(&self) -> bool {
         match self.family {

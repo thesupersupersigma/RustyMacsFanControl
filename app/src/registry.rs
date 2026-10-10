@@ -15,6 +15,10 @@ pub fn wide(s: &str) -> Vec<u16> {
 
 pub struct Key(HKEY);
 
+// Registry handles may be used from any thread.
+unsafe impl Send for Key {}
+unsafe impl Sync for Key {}
+
 impl Key {
     /// Opens (creating if needed) `HKCU\<path>`.
     pub fn open_user(path: &str) -> Option<Key> {

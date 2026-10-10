@@ -33,6 +33,20 @@ pub struct Sensor {
 }
 
 impl Sensor {
+    /// Default "start increasing at" temperature offered for sensor-based control.
+    pub fn suggested_min_temp(&self) -> i32 {
+        (self.value.round() as i32 - 5).max(20)
+    }
+
+    /// Default maximum temperature offered for sensor-based control.
+    pub fn suggested_max_temp(&self) -> i32 {
+        if self.kind == Kind::Cpu {
+            90
+        } else {
+            (self.value.round() as i32 + 5).min(100)
+        }
+    }
+
     /// Whether a stored identifier refers to this sensor.
     pub fn matches_key(&self, wanted: &str) -> bool {
         match self.source {
