@@ -389,66 +389,8 @@ impl Service {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex as StdMutex};
 
-    /// In-memory SMC: keys kept sorted, as the real one lists them.
-    #[derive(Clone, Default)]
-    pub struct FakeSmc {
-        pub keys: Arc<StdMutex<BTreeMap<Key, ([u8; 4], Vec<u8>)>>>,
-    }
-
-    impl FakeSmc {
-        pub fn set(&self, name: &str, kind: &str, data: &[u8]) {
-            self.keys.lock().unwrap().insert(key(name), (key(kind), data.to_vec()));
-        }
-
-        pub fn get(&self, name: &str) -> Vec<u8> {
-            self.keys.lock().unwrap()[&key(name)].1.clone()
-        }
-
-        /// Adds `#KEY` so that it matches the number of keys present.
-        pub fn finish(&self) {
-            let count = self.keys.lock().unwrap().len() as u32 + 1;
-            self.set("#KEY", "ui32", &count.to_be_bytes());
-        }
-    }
-
-    impl Provider for FakeSmc {
-        fn key_by_index(&self, index: u32) -> Option<Key> {
-            self.keys.lock().unwrap().keys().nth(index as usize).copied()
-        }
-
-        fn key_info(&self, key: &Key) -> Option<KeyInfo> {
-            let keys = self.keys.lock().unwrap();
-            let (kind, data) = keys.get(key)?;
-            Some(KeyInfo { size: data.len() as u8, kind: *kind, attributes: 0 })
-        }
-
-        fn read_key(&self, key: &Key, out: &mut [u8]) -> bool {
-            let keys = self.keys.lock().unwrap();
-            let Some((_, data)) = keys.get(key) else {
-                return false;
-            };
-            let n = out.len().min(data.len());
-            out[..n].copy_from_slice(&data[..n]);
-            true
-        }
-
-        fn write_key(&self, key: &Key, data: &[u8]) -> bool {
-            match self.keys.lock().unwrap().get_mut(key) {
-                Some(entry) => {
-                    entry.1 = data.to_vec();
-                    true
-                }
-                None => false,
-            }
-        }
-
-        fn name(&self) -> &'static str {
-            "Fake"
-        }
-    }
+    pub use crate::smc::fake::FakeSmc;
 
     /// A T2 laptop: float fan keys, per-fan mode keys, float temperatures.
     pub fn t2_laptop() -> (FakeSmc, Service) {

@@ -383,6 +383,10 @@ impl Engine {
         &*self.store
     }
 
+    pub fn store_arc(&self) -> Arc<dyn Store + Send + Sync> {
+        self.store.clone()
+    }
+
     pub fn start(&mut self, host: Arc<dyn Host>) {
         let (core, store, stop) = (self.core.clone(), self.store.clone(), self.stop.clone());
         self.threads.push(thread::spawn(move || {
