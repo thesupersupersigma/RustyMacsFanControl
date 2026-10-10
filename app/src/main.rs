@@ -3,6 +3,7 @@ mod lang;
 mod log;
 mod model;
 mod registry;
+mod sensors;
 mod settings;
 mod smc;
 mod win_service;
