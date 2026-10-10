@@ -48,5 +48,7 @@ fn main() {
     res.set_manifest(&manifest(level));
     res.set("ProductName", "Rusty Macs Fan Control");
     res.set("FileDescription", "Rusty Macs Fan Control");
+    res.set("CompanyName", "thesupersupersigma");
+    res.set("LegalCopyright", "thesupersupersigma");
     res.compile().expect("failed to compile Windows resources");
 }

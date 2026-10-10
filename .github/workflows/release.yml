@@ -1,0 +1,56 @@
+name: Release
+
+# Pushing a version tag (v0.1.0, v0.2.0, ...) builds the app and publishes it as a
+# GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the crate version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path app/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match app/Cargo.toml version $version"
+          }
+
+      # The icons, sensor tables and English strings come from the original app and are
+      # not stored in this repository, so they are taken from its official installer.
+      - name: Extract resources from the original app
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://crystalidea.com/downloads/macsfancontrol_setup.exe -OutFile setup.exe
+          $target = Join-Path $PWD original
+          $setup = Start-Process ./setup.exe -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$target`""
+          if (-not $setup.WaitForExit(300000)) { throw 'The installer did not finish' }
+          Get-Process MacsFanControl -ErrorAction SilentlyContinue | Stop-Process -Force
+          python -I re/scripts/extract_assets.py $target app/assets
+
+      - name: Test
+        run: cargo test --manifest-path app/Cargo.toml
+
+      - name: Build
+        run: cargo build --release --manifest-path app/Cargo.toml
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item app/target/release/rusty-macs-fan-control.exe dist/RustyMacsFanControl.exe
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath "RustyMacsFanControl-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: RustyMacsFanControl-${{ github.ref_name }}-windows-x64.zip
+          generate_release_notes: true

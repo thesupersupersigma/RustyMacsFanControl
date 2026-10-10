@@ -27,7 +27,6 @@ def try_tree(tree, names, node_size):
     return files
 
 roots = [m.start() for m in re.finditer(rb'\x00\x00\x00\x00\x00\x02\x00\x00\x00[\x01-\x20]\x00\x00\x00\x01', data)]
-print('candidate roots', [hex(r) for r in roots])
 done = 0
 for tree in roots:
     for node_size in (22, 14):
@@ -42,7 +41,6 @@ for tree in roots:
             except Exception:
                 continue
             if not files or not all(re.fullmatch(r'[\w@. /+-]+', f[0]) for f in files): continue
-            print('tree', hex(tree), 'names', hex(names), 'node', node_size, 'files', len(files))
             globals().setdefault('found', []).append((tree, names, node_size, files))
             break
         else:
@@ -53,7 +51,6 @@ for tree in roots:
 for tree, names, node_size, files in globals().get('found', []):
     base = None
     pngs = [f for f in files if f[0].endswith('.png') and not f[1] & 1]
-    print([ (f[0], f[1]) for f in files][:60])
     if not pngs: continue
     offs0 = pngs[0][2]
     for m in re.finditer(rb'\x89PNG\r\n\x1a\n', data):
@@ -61,7 +58,6 @@ for tree, names, node_size, files in globals().get('found', []):
         if cand < 0: continue
         if all(data[cand + f[2] + 4: cand + f[2] + 8] == b'\x89PNG' for f in pngs[:6]):
             base = cand; break
-    print('data base', base and hex(base))
     if base is None: continue
     for path, flags, off in files:
         n = u32(base + off)

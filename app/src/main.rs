@@ -132,14 +132,13 @@ fn main() {
         probe();
         return;
     }
-    if has("/log") {
-        if let Ok(exe) = std::env::current_exe() {
-            let path = format!("{}.log", exe.to_string_lossy());
-            if let Ok(file) = std::fs::File::create(path) {
-                log::set_file(file);
-            }
-        }
-    } else if let Ok(file) = std::fs::File::create(std::env::temp_dir().join("RustyMacsFanControl.log")) {
+    // The previous run's log is kept alongside as `.previous.log`.
+    let log_path = match std::env::current_exe() {
+        Ok(exe) if has("/log") => std::path::PathBuf::from(format!("{}.log", exe.to_string_lossy())),
+        _ => std::env::temp_dir().join("RustyMacsFanControl.log"),
+    };
+    let _ = std::fs::rename(&log_path, log_path.with_extension("previous.log"));
+    if let Ok(file) = std::fs::File::create(&log_path) {
         log::set_file(file);
     }
     info!("{}", ui::text::app_title());
