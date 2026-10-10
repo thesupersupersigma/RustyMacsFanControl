@@ -62,6 +62,39 @@ impl Model {
         Model::parse(name.trim())
     }
 
+    /// Whether a `models` attribute from the embedded XML tables covers this machine.
+    ///
+    /// `all` matches everything. Otherwise the attribute is a `;`-separated list where a
+    /// plain entry must equal the identifier exactly and an entry containing `+` matches
+    /// the same family from that number upwards (`MacBookPro18,1+` is any MacBookPro
+    /// whose digits read 181 or more).
+    pub fn matches(&self, models: &str) -> bool {
+        if models == "all" {
+            return true;
+        }
+        models.split(';').any(|entry| {
+            if entry.contains('+') {
+                let wanted = Model::parse(entry);
+                wanted.family != Family::Unknown
+                    && wanted.number != 0
+                    && wanted.family == self.family
+                    && self.number >= wanted.number
+            } else {
+                entry == self.name
+            }
+        })
+    }
+
+    /// Passively cooled models: no fans are loaded for these at all.
+    pub fn is_fanless(&self) -> bool {
+        match self.family {
+            Family::MacBookAir => self.number >= 101,
+            Family::MacBookNeo => true,
+            Family::MacBook => matches!(self.number, 81 | 91 | 101),
+            _ => false,
+        }
+    }
+
     /// Macs with a T2 chip, whose SMC is only reachable through the applesmc driver.
     pub fn is_t2(&self) -> bool {
         match self.family {
@@ -100,5 +133,20 @@ mod tests {
         assert!(Model::parse("Macmini8,1").is_t2());
         assert_eq!(Model::parse("MacBook10,1").family, Family::MacBook);
         assert_eq!(Model::parse("Latitude 7490").family, Family::Unknown);
+    }
+
+    #[test]
+    fn matches_model_lists() {
+        let m = Model::parse("MacBookPro16,1");
+        assert!(m.matches("all"));
+        assert!(m.matches("MacBookPro15,1;MacBookPro16,1;MacBookPro18,1+"));
+        assert!(m.matches("MacBookPro13,2+"));
+        assert!(!m.matches("MacBookPro18,1+"));
+        assert!(!m.matches("MacBookAir8,1+"));
+        assert!(!m.matches("macbookpro16,1"));
+        assert!(Model::parse("Macmini10,1").matches("MacBookAir9,1;ADP3,2;Macmini8,1+"));
+        assert!(Model::parse("MacBookAir10,1").is_fanless());
+        assert!(Model::parse("MacBook9,1").is_fanless());
+        assert!(!m.is_fanless());
     }
 }

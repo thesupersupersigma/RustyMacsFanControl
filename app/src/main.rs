@@ -1,7 +1,9 @@
+mod fan;
 mod lang;
 mod log;
 mod model;
 mod registry;
+mod settings;
 mod smc;
 mod win_service;
 

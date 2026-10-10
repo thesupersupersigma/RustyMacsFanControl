@@ -574,3 +574,518 @@ Otherwise hidden. Unchecked by default.
   flag); the fan row is refreshed. If not saved to a preset the profile state becomes "Custom*".
 
 Cancel / closing the dialog: no change.
+
+---------------------------------------------------------------------------------------------------
+## 4. Startup and shutdown sequence
+
+Entry: `main`-level function FUN_00460740 (called from the CRT start-up FUN_00623c50).
+Application class `QMacFanControlApp` (ctor FUN_00431350) : single-instance base FUN_0059a8a0 :
+QApplication wrapper FUN_00593720.
+
+### 4.1 Before QApplication (FUN_00460740)
+
+1. `QCoreApplication::setAttribute(13, true)`, `setAttribute(20, true)`, `setAttribute(4, true)`
+   (raw values; 13/20 are the legacy high-DPI attributes AA_UseHighDpiPixmaps /
+   AA_EnableHighDpiScaling, no-ops in Qt 6; 4 = AA_DontCreateNativeWidgetSiblings).
+2. Three `qRegisterMetaType` typedef registrations.
+3. `QGuiApplication::setHighDpiScaleFactorRoundingPolicy(1)` = **Round** (scale factors are
+   rounded to integers: 125% -> 1, 150% -> 2, 175% -> 2).
+4. Construct the app object.
+
+### 4.2 App constructor (FUN_00431350)
+
+1. `QApplication(argc, argv)`; `setApplicationName("Macs Fan Control")`; thread name "mainThread";
+   `setApplicationVersion("%2.%3.%4")` filled from the EXE version resource (FUN_00593dd0).
+2. **Single instance** (FUN_0059a8a0): a `QLocalSocket` tries `connectToServer("MACSFANCONTROL")`
+   and `waitForConnected(500)`. On Windows a QLocalServer name is the named pipe
+   `\\.\pipe\MACSFANCONTROL`.
+   - connected -> flag `alreadyRunning` (this+0x18) = 1 (nothing is sent; the mere connection is
+     the signal).
+   - not connected -> create `QLocalServer`, `listen("MACSFANCONTROL")`, connect `newConnection()`
+     to the app signal that ends in `slotAnotherInstanceStarted` -> FUN_004360f0: if the main
+     window exists, call its `slotRestore` (show + activate).
+   No mutex and no window-class lookup are used.
+3. Sysinfo object (FUN_004b1d70), logger/license manager set-up (FUN_004329c0, FUN_00433360),
+   SMC service object, QFanControl core (FUN_00442760).
+4. Settings registration and defaults (FUN_00433790, section 5).
+5. Language: default resource `:/build/languages/English.xml` (FUN_00593a60), then load
+   `InterfaceLanguage` (FUN_00595b90, section 8); the resolved file name is written back to
+   `InterfaceLanguage`.
+6. License check (FUN_00432320) - sets app property `pro-version`. Leave out.
+
+### 4.3 `init()` (FUN_00432f70) -> result code
+
+1. Parse arguments (FUN_00435010), `QCoreApplication::arguments()`, exact-match, case-sensitive
+   compare (`compare_helper(..., CaseSensitive)`):
+
+| Switch | Effect | Where |
+|---|---|---|
+| `/minimized` | `app+0x30 = 1`: main window is created but not shown (starts in the tray). Used by autostart. | FUN_00435010 |
+| `/log` | app property `log-file` = "yes" -> log file is written next to the EXE (4.6) | FUN_00435010 |
+| `/smcdump` | app property `smc-dump` = "yes" (consumed by the fan-control core, FUN_0044b0d0: SMC key dump into the log) | FUN_00435010 |
+| `/uninstall` | calls `platform->vtbl[0x14]()` (FUN_00437b00: remove driver/service `AppleSMC`, registry key `Software\CrystalIdea Software\Macs Fan Control`, autostart; run by the uninstaller) and returns result 1 -> process exits silently | FUN_00435010 |
+| `/init` | installer-time initialisation: skips the trial dialog; if the OS check FUN_00437050(10) passes it runs a legacy `AppleSMC.exe /uninstall` from the app folder if that file exists, then installs the kernel driver (FUN_004380f0: `applesmc.sys` / `applesmc32.sys`, service name `AppleSMC`, display name "Apple SMC service"); returns result 1 (exit, no UI) | FUN_00437360 |
+| `/skipcheck` | skips both the virtual-machine check and the "is this Apple hardware" check | FUN_00437360 |
+| `/inpout32` | force SMC backend 0 (inpout32.dll port I/O) (FUN_004b1b20(0)) | FUN_00437360 |
+| `/applesmc` | force SMC backend 1 (applesmc.sys driver) (FUN_004b1b20(1)) | FUN_00437360 |
+
+2. First run: if `AppFirstRun != 0` -> write `AppFirstRun = 0` and set app property
+   `first-start` (FUN_00436010).
+3. `printSysInfo` (FUN_00435390) logs: `"Macs Fan Control 1.5.21"`, `"Process PID=%1"`, the OS
+   description string, the machine model, `"%1 [%2 cores]"` (CPU name, core count), `"Qt 6.8.3"`.
+4. If `alreadyRunning` -> return 6.
+5. Otherwise return `platform->vtbl[4]()` = FUN_00437360:
+   1. `FUN_00593fe0(app, true)`: enable dark-mode support + watcher (section 9).
+   2. Unless `/init`: if `pro-version` is not set, the trial dialog is shown here (FUN_004c0c30)
+      and property `trial-version` is set. **Trigger point only - leave out.**
+   3. Unless `/skipcheck`: VM check FUN_00438c60 (reads
+      `HKLM\SYSTEM\CurrentControlSet\Control\SystemInformation\SystemManufacturer`; contains
+      "Parallels" or "VMware" (case-insensitive `indexOf`) -> VM) -> return 5. Then: machine model
+      string empty (not Apple hardware) -> return 4.
+   4. `/init` path as in the table -> return 1.
+   5. Normal path: `CoInitializeEx(NULL, 0)`; crash-report set-up with
+      "support@crystalidea.com" (FUN_00594890); backend overrides; then if app property
+      `win-no-support` is not set and the SMC service init FUN_004ac360() returns 2 -> return 3,
+      else return 0.
+
+### 4.4 Result handling (switch in FUN_00460740)
+
+| Code | Action |
+|---|---|
+| 0 | `platform->vtbl[8]()` (FUN_00433350 -> FUN_00432dc0: create the main window; start worker threads) then `QApplication::exec()` |
+| 1 | exit silently (`/uninstall`, `/init`) |
+| 2 | FUN_004330c0: `QProcess::startDetached(applicationFilePath(), [])` - relaunch itself, then exit (used by the license flow) |
+| 3 | QMessageBox (parent 0): icon 2 (Warning), text `<b>Error initializing SMC interaction layer</b>`, informative text "Please make sure that your Mac system is supported and you have correctly installed the program.", window title = the SMC error string from the platform object, window icon = tray icon (FUN_0045d9f0). Buttons: "Copy log" (role value 6; copies the whole log text to the clipboard, FUN_00460610 -> FUN_00434cf0) and standard OK (0x400). Then exit. |
+| 4 | native `MessageBoxW` with caption "Macs Fan Control 1.5.21" and text "Unsupported hardware detected. The program is able to run on Apple hardware only. \n\nIf you're sure you run the app on Apple computer, please use the /skipcheck command line switch." Then exit. |
+| 5 | unless `NoVmWarning == 1`: QMessageBox, icon 2 (Warning), text `<b>Virtual machine detected</b>`, informative text "Unable to start Macs Fan Control in a virtual machine.", OK button, window icon = tray icon, check box "Don't display this warning again" (checked -> `NoVmWarning = 1`, FUN_00460530). Then exit (in both cases the app does not run in a VM). |
+| 6 | another instance is running: exit immediately (the first instance has already restored its window) |
+
+After the switch: app destructor (FUN_004319f0), return code.
+
+### 4.5 Main window creation (FUN_00432dc0)
+
+- `new QFanControlMainWindow` (section 1); the tray icon object is created with it.
+- If not `/minimized`: if app property `first-start` is **not** set -> `show()` immediately
+  (geometry restored from settings). If `first-start` is set the window is shown later from
+  `slotInitFinished` auto-sized and centred (1.8).
+- With `/minimized` the window stays hidden; only the tray icon appears.
+
+### 4.6 Log file
+
+- Logger: spdlog logger named "SimpleLogger", pattern
+  `[%Y-%m-%d %H:%M:%S:%e] [thread %t] [%s#%#] %v` (FUN_005536e0) (millisecond timestamp, thread
+  id, source file#line, message).
+- Path (FUN_00434e10): without `/log`: `QDir::tempPath() + "\MacsFanControl.log"`
+  (i.e. `%TEMP%\MacsFanControl.log`); with `/log` (property `log-file`): `platform->vtbl[0x18]()` =
+  the EXE path with `.exe` replaced by `.exe.log` (FUN_00437e80), e.g.
+  `C:\Program Files (x86)\MacsFanControl\MacsFanControl.exe.log`.
+- INFERRED: the file sink is always created (FUN_00433360 calls the sink factory unconditionally
+  with the path); there is no "enable log" registry switch on Windows - `EnableLog` is in the list
+  of obsolete values that are deleted (section 5). UNKNOWN: truncate-vs-append and rotation
+  parameters (a rotating sink exists in the binary; arguments not traced).
+
+### 4.7 Shutdown (FUN_00463330, run once from closeEvent when quitting)
+
+1. Save window geometry/state and splitter sizes (FUN_00465b50, section 5).
+2. `hide()` the main window; hide the tray icon (FUN_004bf730(0)).
+3. `QFanControl::stopAndWaitForFinished()` (FUN_0044db90) - stops the worker threads (restoring
+   fan state is part of the fan-control core, not covered here).
+4. If that fails: message box, title "Macs Fan Control 1.5.21", text "Unable to terminate the app
+   in the right way, \nplease contact support for assistance and resolving the problem.", OK.
+5. The window closes; `exec()` returns; app destructor.
+Quit triggers: tray "Exit" (`slotExit`), WM_QUERYENDSESSION (1.8), fatal init crash.
+
+---------------------------------------------------------------------------------------------------
+## 5. Settings
+
+Storage: `QSettings(organization = "CrystalIDEA Software", application = "Macs Fan Control")`
+(FUN_00433790 -> FUN_00593b00 -> FUN_00596f80), native format = registry key
+**`HKCU\Software\CrystalIDEA Software\Macs Fan Control`**. Qt stores ints as REG_DWORD, strings as
+REG_SZ, string lists as REG_MULTI_SZ, QByteArray as REG_SZ `@ByteArray(...)` (or REG_BINARY when it
+contains NULs). Every write is followed by `QSettings::sync()` (FUN_00599ab0 etc.).
+Typed accessors: int read FUN_005987a0 / write FUN_005999b0; string read FUN_005988a0 / write
+FUN_00599ab0; string-list read FUN_005989b0 / write FUN_00599bb0; QDateTime (stored as string)
+read FUN_00598640 / write FUN_00599880; QByteArray read FUN_00598530 / write FUN_00599780.
+Defaults are registered in FUN_00433790 (and FUN_00438f80 for the last two).
+
+| Value | Type | Default | Read | Written |
+|---|---|---|---|---|
+| `Fahrenheit` | int 0/1 | 0 | sensors header/values FUN_004bbd60, FUN_004bd110, FUN_004bce30; fan dialog FUN_004bd040, FUN_004bd1e0, FUN_004bcd60; prefs FUN_0046d410 | prefs `OnTempScaleChanged` FUN_0046db40 |
+| `PreciseTemperature` | int 0/1 | 0 | sensors model FUN_004bb660; tray FUN_004bf940; prefs FUN_0046d410 | prefs `OnPreciseChanged` FUN_0046da90 |
+| `ShowDrives` | int 0/1 | **1** | sensor provider FUN_0047e120; prefs FUN_0046d410 | prefs FUN_0046dd80 |
+| `ShowDrivesExternal` | int 0/1 | 0 | FUN_0047e120; prefs | prefs FUN_0046de70 |
+| `ShowEGpuTemp` | int 0/1 | default taken from the GPU provider capability (`provider->vtbl[0xc]()` when the machine has Thunderbolt, FUN_004b2650); forced to 0 at start-up when eGPU is unsupported | prefs FUN_0046d410 | FUN_00433790 (forced 0), prefs FUN_0046df60 |
+| `traySensor` | string (sensor identifier/name as stored in the combo item data) | "" (none) | tray FUN_004bf1b0; prefs FUN_0046bf30; FUN_00467c50; FUN_0044e460 | prefs `OnSensorTrayChanged` FUN_0046bdb0; reset to "" in FUN_00467c50 when the sensor vanished |
+| `InterfaceLanguage` | string, language file name e.g. `English.xml` | "" (= follow system language) | FUN_00431350 | FUN_00431350 (resolved name written back at every start), prefs FUN_0046ab60 |
+| `ActivePreset` | string | "" | profile list FUN_00453fa0 | FUN_00454f70 |
+| `CustomPresets` | string list | empty | FUN_00454670 | FUN_00455210 (format belongs to the preset spec) |
+| `License` | string | "" | FUN_00432320, FUN_004349d0 | license code - leave out |
+| `AppFirstRun` | int | non-zero when absent (the first run writes 0); the registered default constant is not visible in the decompilation - INFERRED 1 | FUN_00432f70 | FUN_00432f70 (set to 0) |
+| `RateOnMacupdateSkip` | int 0/1 | 0 | FUN_0046f6b0 | FUN_0046f550 (set 1) |
+| `RateOnMacupdateNextDate` | QDateTime as string (Qt::TextDate, `QDateTime::fromString(s, format 0)`) | invalid | FUN_0046f490, FUN_0046f6b0 | FUN_0046f5e0 (now + 604800 s = 7 days) |
+| `WindowSplitterPosition` | string list of 2 decimal ints (pane widths in logical px: left, right) | empty -> `[width-240, 240]` | FUN_004658a0 | FUN_00465b50 at shutdown |
+| `WindowGeometry` | QByteArray = `QWidget::saveGeometry()` blob | empty | FUN_0059e500 | FUN_0059e6c0 at shutdown |
+| `WindowState` | QByteArray = `QMainWindow::saveState()` blob (version 0) | empty | FUN_0059e500 | FUN_0059e6c0 at shutdown |
+| `NoVmWarning` | int 0/1 | 0 (FUN_00438f80) | FUN_00460740 | FUN_00460530 |
+| `WindowState2` | QByteArray, default empty (FUN_00438f80) | - | **Not window geometry.** It is read/written only by the trial-period code (FUN_004c2100, FUN_004c25a0, FUN_004c2a50); the name is a disguise. Leave out with the trial/licence feature. | |
+
+`WindowGeometry` / `WindowState` are opaque Qt blobs (magic 0x1D9D0CB, version, frame/normal
+geometry rects, screen number, maximized/fullscreen flags, screen width, ...). A native rewrite
+cannot usefully reuse them: store its own placement (e.g. WINDOWPLACEMENT) under a new value name
+and ignore the Qt values.
+
+Obsolete values deleted at start-up if present (registered as removed, FUN_00433790 ->
+FUN_00597f80): `Fans`, `Machine`, `CPU`, `TempSensors`, `ShowGpuTemp`, `EnableLog`,
+`ShowSmartDrives`, `ShowNVMeDrives`, `Fan_0` ... `Fan_9`.
+
+There are **no** registry values for tray icon style, tray fan or two-line display on Windows
+(those controls are hidden, 6.3). The update checker keeps its own values (auto-check flag etc.,
+FUN_005a39d0 / FUN_005a3bc0) - leave out with the update checker.
+
+Other registry locations touched:
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme` (read, dark mode, FUN_0059eab0)
+- `HKLM\SYSTEM\CurrentControlSet\Control\SystemInformation\SystemManufacturer` (read, VM check, FUN_004388c0)
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\MacsFanControl` (legacy autostart, 6.4)
+
+---------------------------------------------------------------------------------------------------
+## 6. Preferences window (`QPreferencesDialog`)
+
+Created by `slotPreferences` (FUN_00467720) through the dialog helper (7.7); constructor
+FUN_0046a1b0 on top of a generic "toolbar preferences" dialog FUN_005b9070.
+
+### 6.1 Frame
+
+- QDialog with widget attribute 0x4C cleared (`setAttribute(76, false)`); window icon = app icon
+  (FUN_0059fb90).
+- A **QToolBar** child (FUN_005bc470): not floatable, not movable,
+  `toolButtonStyle = 3` (ToolButtonTextUnderIcon), `iconSize = 32x32`, one checkable action per
+  page in an exclusive QActionGroup; toolbar is `adjustSize()`d after pages are added.
+- Pages are plain child widgets of the dialog; only the current one is visible. Selecting a page
+  (FUN_005b9ac0): hide all, show the page, page is moved to `(40, toolbarHeight + 0)`, and the
+  dialog is resized to `(toolbarAreaWidth, pageHeight + toolbarHeight)` where the width comes from
+  FUN_005bc8f0 (derived from the toolbar buttons' widths; exact formula not traced - UNKNOWN) -
+  instantly on first show, otherwise with a `QPropertyAnimation` on `size`, duration 150 ms.
+- Window title = `tr("PreferencesWindow/title") + ": " + pageTitle` e.g. "Preferences: General".
+- No OK/Cancel buttons; every control applies immediately.
+
+| # | Page | Title | Icon |
+|---|---|---|---|
+| 0 | `QPreferencesGeneral` (FUN_0046a6f0) | tr("PreferencesWindow/TabGeneral") "General" | `:/Resources/preferences_general.png` |
+| 1 | `QPreferencesSensors` (FUN_0046d410) | `"T° %1".arg(tr("PreferencesWindow/tabSensors"))` = "T° Sensors" (FUN_0046dc10) | `:/Resources/preferences_sensors.png` |
+| 2 | `QPreferencesMenubar` (FUN_0046bb40) | tr("PreferencesWindow/tabTrayIcon") "Tray icon" | `:/Resources/preferences_menubar.png` |
+
+(icons FUN_0045d750). There is no Diagnostics tab on Windows (`tabDiagnostics`, `checkLog`,
+`browseLog`, `preferences_diagnostics.png` are not referenced).
+
+Signals: any change emits the dialog's "preferences changed" signal -> main window
+`slotUpdatePreferences` (FUN_00468440: retranslate everything, refresh tables, rebuild tray);
+sensor-list options additionally emit `sensorsReloadRequired` -> core reloads sensors.
+
+### 6.2 General page (setupUi FUN_0046b1d0, 422 x 121; texts FUN_0046b970)
+
+- `verticalLayout` QVBoxLayout
+  - `checkAutostart` QCheckBox - tr("PreferencesWindow/checkSystemStart") "Autostart minimized when you log in (recommended)". Initial state = `platform->vtbl[0x10]()` (autostart exists, 6.4). Toggle -> `OnAutoStartChanged` (FUN_0046aad0): `platform->vtbl[0xc](checked)` then re-reads the real state back into the box.
+  - `checkUpdates` QCheckBox - tr("PreferencesWindow/checkUpdatesOnStartup") "Check for updates when the app starts"; state from/to the update checker (FUN_005a39d0 / FUN_005a3bc0). Leave out or keep as a dead setting.
+  - `checkDockIcon` (`QCheckBoxDockIconToggle`) - **hidden on Windows** (`setVisible(false)` in FUN_0046a6f0)
+  - `horizontalLayout`: `labelLanguage` QLabel (alignment 0x82 = AlignRight|AlignVCenter, wordWrap) tr("PreferencesWindow/staticLanguage") "Language:"; `comboLanguage` (minimumSize 210x0, maximumSize 195x16777215 as coded, `maxVisibleItems = 30`); `labelTranslate` QLabel (alignment 0x82) with rich text `<a href="translate">Translate</a>` (not translated); spacer 40x20 (Expanding, Minimum)
+- `adjustSize()` after texts are set.
+
+Language combo (FUN_005a52f0): one item per `*.xml` file found in `<exe dir>\languages`
+(`QDir::entryList(filter = Files)`, directory order = alphabetical), item data = file base name
+(without `.xml`), item text = base name, or `"%1 (%2)"` with %2 = native language name from a
+built-in table (FUN_00623e00) when the table has an entry. Current item = current language.
+`OnLanguageChanged` (FUN_0046ab60): if the selected name differs from the current one: load
+`<name>.xml` (FUN_00595b90), write `InterfaceLanguage = <name>.xml`, emit the changed signals ->
+all windows retranslate live (no restart).
+`labelTranslate` link `translate` -> opens
+`https://crystalidea.com/macs-fan-control-translation?source=fancontrol_win` (FUN_0046ad20).
+
+### 6.3 Tray icon page (setupUi FUN_0046c390, 421 x 161; texts FUN_0046ce90)
+
+- `verticalLayout`
+  - `gridLayout`:
+    - (0,0) `labelIcon` "Icon:" / (0,1) `comboIcon` - **hidden on Windows**
+    - (1,0) `labelFan` "Fan:" / (1,1) `comboFan` - **hidden on Windows**
+    - (2,0) `labelSensor` QLabel max width 100, alignment 0x82 (right), wordWrap - tr("PreferencesWindow/staticSensor") "Sensor:"
+    - (2,1) `comboSensor` QComboBox, `maxVisibleItems = 20`
+    - (2,2) `staticCelsius` QLabel - tr("PreferencesWindow/staticCelsiusOnlyOnWindows") "(Celsius only)"
+  - `checkTwoLines` - **hidden on Windows**
+  - vertical spacer 17x1 (Minimum, Expanding)
+
+(The five hidden widgets are hidden with plain `setVisible(false)` in FUN_0046bb40.)
+`comboSensor` (FUN_0046bf30): item 0 = tr("PreferencesWindow/comboOptionNone") "None" with a
+transparent 16x16 icon and null data; then one item per sensor (sensor icon, sensor name, data =
+sensor identifier string). Selection = item whose data equals `traySensor`, else 0.
+`OnSensorTrayChanged(index)` (FUN_0046bdb0): `traySensor = (index < 1) ? "" : itemData(index)`,
+emit changed -> tray icon redrawn (2.1).
+
+### 6.4 Sensors page (setupUi FUN_0046e370, 445 x 175; texts FUN_0046eae0)
+
+- `verticalLayout`
+  - `labelSensors` QLabel tr("PreferencesWindow/labelSensors") "Read temperatures of"
+  - `checkDrives` tr("PreferencesWindow/checkDrives") "Connected NVMe/SATA drives" (`ShowDrives`)
+  - `horizontalLayout`: `checkDummy` QCheckBox - **hidden but keeps its size**
+    (`setRetainSizeWhenHidden` + `setVisible(false)`), acting as an indent; `checkDrivesExternal`
+    tr("PreferencesWindow/checkDrivesExternal") + `" (USB)"` or `" (Thunderbolt/USB)"` when the
+    machine has Thunderbolt (FUN_004b2650) -> "Including external drives (USB)"
+    (`ShowDrivesExternal`); spacer 40x20 (Expanding, Minimum)
+  - `checkGPUThunderbolt` tr("PreferencesWindow/checkExternalGPU") "eGPUs connected via Thunderbolt" (`ShowEGpuTemp`); disabled unless the machine has Thunderbolt and the GPU provider supports it
+  - `line` QFrame, frameShape 4 (HLine), frameShadow 0x30 (Sunken)
+  - `checkFahrenheit` tr("PreferencesWindow/checkFahrenheit") "Use Fahrenheit temperature scale"
+  - `checkPrecise` tr("PreferencesWindow/checkPrecise") "Precise display of temperature when possible (e.g. 45.4)"
+
+Behaviour: each box writes its value immediately (table in section 5). The three "read
+temperatures of" boxes also emit `sensorsReloadRequired`. `slotDrivesChecked(bool)`
+(FUN_0046eaa0): `checkDrivesExternal.setEnabled(checked)`; when unchecked it is also unchecked.
+
+### 6.5 Autostart (FUN_00439400 set, FUN_004386d0 query) - `WindowsTasks::*` wrappers over Task Scheduler 2.0 COM
+
+On Windows Vista or later (FUN_00437050(6,0,0)):
+
+| Property | Value | Wrapper |
+|---|---|---|
+| Task name | `MacsFanControl` | FUN_00562cd0 |
+| Folder | root folder `\` (the folder-name argument is the empty string at 0x00756204) | FUN_00562cd0 |
+| RegistrationInfo.Author | `CrystalIDEA Software` | TaskDefinition::setAuthor FUN_00564190 |
+| Principal.RunLevel | 1 = TASK_RUNLEVEL_HIGHEST (needed because the EXE is `requireAdministrator`) | setHighestPriviledges FUN_005643b0 |
+| Principal.LogonType | 3 = TASK_LOGON_INTERACTIVE_TOKEN | setLogonType FUN_00564480 |
+| Trigger | one trigger of type 9 = TASK_TRIGGER_LOGON (no user id / delay set -> any user logon) | TaskTriggers::createTrigger FUN_005660e0 |
+| Settings.DisallowStartIfOnBatteries | false | FUN_00564740 |
+| Settings.StopIfGoingOnBatteries | false | FUN_00564a20 |
+| Action | type 0 = TASK_ACTION_EXEC; Path = full path of the running EXE; Arguments = `/minimized` | FUN_00565000, setExe FUN_00565a00, setArguments FUN_00565920 |
+| Registration | `RegisterTaskDefinition(name, def, 6 = TASK_CREATE_OR_UPDATE, ...)` with empty user/password | FUN_00562cd0 |
+
+Other settings (ExecutionTimeLimit, MultipleInstances, ...) are left at Task Scheduler defaults -
+only the two battery flags are changed.
+- Disable: delete task `MacsFanControl` (FUN_00561c30) and also delete the legacy value
+  `HKCU\...\Run\MacsFanControl`.
+- Query (check box state): task `MacsFanControl` exists (FUN_00563620).
+- Pre-Vista fallback: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MacsFanControl`
+  (REG_SZ) = `"<exe path>" /minimized`.
+
+---------------------------------------------------------------------------------------------------
+## 7. Other dialogs
+
+All app dialogs derive from `QDialogEx` (FUN_0059e850) which clears the `?` title-bar button
+(`setWindowFlags(flags & ~0x00010000)` = no WindowContextHelpButtonHint, FUN_005a6570) and applies
+the dark title bar (section 9).
+
+### 7.1 About (`QInfoDialog`, ctor FUN_0045ded0, setupUi FUN_0045f300)
+
+- Title tr("AboutDialog/title") "About Macs Fan Control"; window icon = tray icon; setupUi size
+  350 x 205, then `adjustSize()` + `setFixedSize()`.
+- Layout: `verticalLayout_2` [ `horizontalLayout` [ `m_AboutIcon` QLabel (alignment 0x85) showing
+  the app icon (`:/Resources/icon_128.png`, FUN_0045d6d0) as a 128x128 pixmap ;
+  `verticalLayout` (spacing 6) [ spacer 20x40 ; `labelAppName` ; `labelCopyright` ; `labelVersion` ;
+  `labelLicense` ; `labelSupport` ; spacer 20x40 ] ] ; `labelDisclamer` ; `buttonBox` ]. All text
+  labels are centred (0x84); `labelDisclamer` is wordWrap, alignment 1 (left), no frame.
+- `labelAppName` = `"<b>" + "Macs Fan Control" + " " + "1.5.21" + " Build %1".arg(build) + "</b>"`
+  where build = FUN_00593dc0() (4th component of the EXE file version).
+- `labelCopyright` = `"© 2013-%1 CrystalIDEA Software".arg(current year)` (string at 0x007598a8).
+- `labelLicense`: Pro -> tr("AboutDialog/staticProVersion").arg(n) "Pro version, %1 computer(s)
+  license"; not Pro -> the label is toggled with `setVisible` and the trial/free text
+  (tr("TrialDialog/trialVersion") / tr("AboutDialog/staticFreeVersion")) is prepared. UNKNOWN:
+  exactly which of `labelVersion` / `labelLicense` receives which of these strings (label
+  pointers are lost in the decompilation); license-related, so a rewrite can show name+version
+  and omit the licence line.
+- `labelSupport` = `<a href='help'>%1</a>` with tr("AboutDialog/staticOnlineHelp") "Online help";
+  `linkActivated` -> `OnLinkActivated` (FUN_0045ecc0) opens
+  `https://crystalidea.com/macs-fan-control/support`.
+- `labelDisclamer` = tr("AboutDialog/staticWarning") (the upper-case disclaimer).
+- Button: QPushButton tr("Common/buttonClose") "Close", default + autoDefault, role 1 (RejectRole).
+
+### 7.2 Save / rename preset (`QSaveEditProfileDialog`, ctor FUN_0046f820, setupUi FUN_004705d0)
+
+- setupUi size 300 x 100, then `adjustSize()` + `setFixedSize()`; window icon = app icon set
+  (FUN_0045db90); attribute 0x4C cleared.
+- Layout: QVBoxLayout [ `labelTitle` QLabel centred (text = the window title) ; QHBoxLayout
+  [ `labelProfileName` tr("Presets/labelPresetName") "Preset name:" ; `comboName` editable
+  QComboBox (`sizeAdjustPolicy 1`, `minimumContentsLength 14`) ; `editName` QLineEdit
+  (`maxLength 30`) ] ; `buttonBox` (OK / Cancel added in code, FUN_00470140) ].
+- Two modes (which of comboName / editName is visible is decided in the ctor; INFERRED from the
+  two code paths):
+  - **Save** (no current name): title tr("Presets/savePresetTitle") "Save custom preset"; the
+    editable combo is used, filled with the existing custom preset names (choose one to
+    overwrite, or type a new name).
+  - **Rename** (current name given): title tr("Presets/editPresetTitle") "Edit preset name"; the
+    line edit is used, pre-filled with the current name.
+- `textChanged` (FUN_00470c30) validates on every edit and enables/disables OK (member +0x1c):
+  the name must be non-empty; in rename mode it must differ from the original name
+  (FUN_00448e70 string compare), and it is then compared lower-cased against each existing
+  preset name (case-insensitive duplicate check). PARTLY UNKNOWN: the polarity of the last two
+  comparisons could not be read reliably from the decompilation - verify against the running
+  app whether duplicates are rejected in save mode (where picking an existing name means
+  "overwrite"). `accept` returns the name to
+  `letUserSelectProfileName` (FUN_00464eb0), which returns "" on cancel.
+
+### 7.3 "Fans disabled by hardware" (`messageFanControlLimited/*`)
+
+Not present in the Windows build: none of the `messageFanControlLimited` keys is referenced by
+any function (macOS-only, Apple-silicon behaviour). Nothing to implement.
+
+### 7.4 Tech-info zip (`slotCreateTechInfoZip` FUN_00466b40, `TechZip::createZip` FUN_004b4f50)
+
+1. The main window is shown (`showNormal`, `activateWindow`, `raise`, `processEvents`) so it can be
+   captured.
+2. Four temp files are written in `QDir::tempPath()` (extensions `txt`, `log`, `smc`, `png`):
+   system info text, the log, an SMC dump, and a screenshot of the main window (failure of the
+   screenshot callback is only logged: "screenshotFunc failed").
+3. Zip created at `QStandardPaths::writableLocation(DesktopLocation)` with file name
+   `"%1_tech_info.zip"` (%1 = INFERRED machine model identifier; argument not traced). Entries:
+   `app_screen.png`, `app_info.txt`, `app_log.txt`, `smc_dump.txt`. Temp files are removed.
+4. Success: QMessageBox with text tr("TrayMenu/itemTechInfoZip") "Create tech zip file...",
+   informative text tr("techInfoZipMessage/message").arg(zip file name), an extra button
+   tr("techInfoZipMessage/browseButton") "Show zip file" (role 0; reveals the file, FUN_00464cb0)
+   plus the default OK.
+   Failure: message box title "Create technical info", text "Unable to create tech_info.zip file."
+
+### 7.5 Christmas
+
+Only the snowflake watermark in the two tables, 24-31 December (1.7, FUN_00469b40).
+`christmas_santa.png` is not referenced; the tray icon is not changed.
+
+### 7.6 Rate-me (`QRateMeDialog`, FUN_0046ee90)
+
+- At main-window construction: if `RateOnMacupdateNextDate` is not a valid date it is set to
+  now + 7 days (FUN_0046f490).
+- Checked each time the window is restored from the tray (`slotRestore`, FUN_00467ad0), only when
+  the window was hidden: show if FUN_0046f6b0() (`RateOnMacupdateSkip == 0` and now is past
+  `RateOnMacupdateNextDate`; the next date is then pushed 7 days ahead) and FUN_00438b10() is
+  false (licence-state predicate, not analysed).
+- QMessageBox: text tr("RateMeDialog/message") "Rate the app on MacUpdate"; informative text
+  tr("RateMeDialog/informativeText").arg("Macs Fan Control"); icon pixmap = app icon 48x48;
+  buttons tr("RateMeDialog/buttonRate") "Rate on MacUpdate" (role 0 AcceptRole) and
+  tr("RateMeDialog/buttonNoThanks") "No, thanks" (role 1 RejectRole); check box
+  tr("RateMeDialog/checkDontShowAgain") "Do not show this message again".
+- Result: check box checked -> `RateOnMacupdateSkip = 1`; Rate clicked -> `slotRateApp` (opens
+  `https://www.macupdate.com/app/mac/47386/macs-fan-control`, sets Skip = 1).
+
+### 7.7 Dialog helper (`MenubarAppDialogHelper`, FUN_00469940 / FUN_00469700)
+
+Preferences, About and upgrade dialogs are shown through a helper owned by the main window: it
+clears attribute 0x4C, sets attribute 0x37 (WA_DeleteOnClose); if no helper dialog is active
+(`DAT_0089f1fc == 0`): `setModal(parent != null)`, `show()`, and when parentless also
+`activateWindow()` + `raise()`; if one is active it is closed first and the new one is shown when
+the old one is destroyed (FUN_00469850). So only one of these dialogs is open at a time and they
+are shown with `show`, not `exec`. The parent is the main window if it is visible, otherwise
+no parent (so they work while the app is hidden in the tray).
+
+### 7.8 Licence / trial / upgrade / update checker - trigger points only
+
+| Feature | Triggered from |
+|---|---|
+| Trial dialog (`TrialDialog/*`, FUN_004c0c30) | start-up, FUN_00437360 step 2, when `pro-version` is unset |
+| Licence check | app ctor FUN_00432320; `License` value |
+| Upgrade dialog (`UpgradeToProDialog/*`, FUN_004c4c40) | `slotUpgradeToPro` FUN_00468670 <- tray "Upgrade to Pro version", presets menu "Available in PRO version", "Save..." when not Pro |
+| Enter licence (`EnterLicenseDialog/*`) | `slotEnterLicense` FUN_00466f10 (from the upgrade/trial dialogs) |
+| Licence warning / deactivate | `showLicenseWarning` FUN_00466a40, `deactivateLicense` FUN_004643d0 |
+| Update checker | created in the main window ctor FUN_00468790 (feed `https://crystalidea.com/update/fancontrol.xml.gz`, download page `https://crystalidea.com/macs-fan-control/download`, first check scheduled by FUN_005a2e40(0, 24)); manual: `slotCheckForUpdates` FUN_00466b20 <- tray "Check for updates..."; preference `checkUpdates` |
+| Title bar text "Trial version" / "Pro" | FUN_00468cb0 |
+
+---------------------------------------------------------------------------------------------------
+## 8. Language XML
+
+- Files: `<exe dir>\languages\<Name>.xml`; root `<LanguageStrings version=".." Author="..">`.
+  A copy of English is embedded as resource `:/build/languages/English.xml`.
+- Parsing (FUN_005961d0, recursive): every element without child elements becomes one entry whose
+  key is the `/`-joined path of element names below the root, e.g. `MainWindow/buttonPreferences`,
+  `core/UpdateChecker/ReleasedOn`. The value is the element text decoded as UTF-8 with every
+  literal two-character sequence `\n` (backslash, n) replaced by a real newline. XML entities
+  (`&amp;`, `&lt;br/&gt;`) are decoded by the XML parser, so `statusWarning` contains a literal
+  `<br/>` that Qt rich text renders as a line break.
+- Loading (FUN_00595b90, argument = stored `InterfaceLanguage`):
+  1. clear the table, parse the embedded English resource into it (current name = `English.xml`);
+  2. requested name empty -> `QLocale::languageToString(QLocale::system().language()) + ".xml"`
+     (e.g. `German.xml`); a name without `.xml` gets it appended;
+  3. if the name is not `English.xml`: open `<exe dir>\languages\<name>`; if it opens and parses,
+     its entries are added over the English ones and it becomes the current language; otherwise
+     English stays.
+  Because the English table is loaded first, **a key missing from a translation falls back to
+  the embedded English text**.
+- Lookup (FUN_005964a0, wrapped per class e.g. FUN_00464fd0, FUN_004c6060): returns the entry; if
+  there is no table or the key is unknown everywhere, returns **the key string itself**.
+- Placeholders: plain `QString::arg` - `%1`, `%2`, `%3` replaced in order of the `.arg()` calls
+  (lowest-numbered marker first).
+- Markdown-ish conversion, applied only where noted (no-fans overlay; FUN_005a59c0):
+  1. newline -> `%newline%`; 2. regex `\[(.+?)\]\((.+?)\)` -> `<a href="\2">\1</a>`;
+  3. regex `\*\*(.+?)\*\*` -> `<b>\1</b>`; 4. `%newline%` -> `<br>`. The result is shown in a QLabel
+  with `openExternalLinks(true)`.
+- Language list for the combo: all `*.xml` in the folder (6.2). Switching is live.
+- Keys present in English.xml but unused on Windows (verified unreferenced): `buttonMinimizeMac`,
+  `messageHelperTool*`, `messageFanControlNotAvailable*`, `itemUninstall`, `itemExitMac`,
+  `tabTrayIconMac`, `tabDiagnostics`, `checkLog`, `browseLog`, `messageFanControlLimited/*`,
+  `UninstallDialog/*`, `core/LetsMoveMac/*`; `checkDockIcon`, `staticFan`, `staticIcon`,
+  `comboIconOption*`, `checkTwoLines` are set on hidden widgets only.
+
+---------------------------------------------------------------------------------------------------
+## 9. Dark mode, style and DPI
+
+### 9.1 Style
+
+The app sets the widget style explicitly (FUN_00594370), it does not rely on Qt's default
+(`styles/qmodernwindowsstyle.dll` provides both `windowsvista` and `windows11`; the app asks the
+factory for **"WindowsVista"**):
+
+| Mode | Style | Palette | App style sheet |
+|---|---|---|---|
+| Light | `QStyleFactory::create("WindowsVista")` | the palette captured at start-up (`QGuiApplication::palette()`) | the style sheet captured at start-up (empty) |
+| Dark | `QStyleFactory::create("Fusion")` | custom, below | `QToolTip { color: #ffffff; background-color: #2a82da; border: 1px solid white; }` |
+
+Dark palette (QPalette::ColorRole raw value -> colour):
+Window(10) #2D2D2D; WindowText(0) white; Base(9) #121212; AlternateBase(16) #2D2D2D;
+ToolTipBase(18) white; ToolTipText(19) white; Text(6) white; Disabled Text #7F7F7F;
+Button(1) #2D2D2D; ButtonText(8) white; Disabled ButtonText #7F7F7F; BrightText(7) red;
+Link(14) #2A82DA; Highlight(12) #2A82DA; HighlightedText(13) black; Disabled HighlightedText
+#7F7F7F.
+
+### 9.2 Dark-mode detection and switching
+
+- Dark = `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme == 0`
+  (FUN_0059eab0).
+- Support is gated by the undocumented uxtheme dark-mode API being available (`WinDarkMode`
+  singleton FUN_00627780 resolves `AllowDarkModeForApp`, `AllowDarkModeForWindow`,
+  `ShouldAppsUseDarkMode`, `IsDarkModeAllowedForWindow`, `IsDarkModeAllowedForApp`,
+  `ShouldSystemUseDarkMode`; predicate FUN_00627cc0). If unavailable nothing is changed.
+- `FUN_00593fe0(app, watch = true)` at start-up: sets app properties `DarkModeSupport` and
+  `DarkModeWatchChanges`, applies the mode once, and starts `System::WindowsDarkModeWatcher`
+  (background task; emits `darkModeChanged` through `System::PowerSource`-style notifier
+  FUN_0059ee40) -> FUN_005942f0 re-reads the registry value and calls FUN_00594370 again: the
+  switch is **live**, no restart.
+- Per window (`MacWindowWindows` mix-in FUN_005a6300 -> FUN_005a6320, used by the main window and
+  every QDialogEx): on creation, and again on every dark-mode change (FUN_005a6500), calls the
+  WinDarkMode helper with `(winId(), isDark)` (FUN_00627e10) - INFERRED: `AllowDarkModeForWindow`
+  + DWM immersive-dark-mode title bar attribute; the exact DWM attribute id was not read.
+- App-drawn exceptions that react to dark mode: only the "no fans" overlay label colour
+  (#293956 light / #ffffff dark, evaluated when the label is rebuilt, FUN_004b6fd0). The orange
+  #FF7E00 RPM highlight, the grey (128,128,128) stale-sensor colour and the dark-blue tray bitmap
+  are the same in both modes.
+- `System::WindowsPowerSourceWatcher` (`powerSourceChanged`) also exists (FUN_005a6b70); it feeds
+  the fan-control core, there is no UI for it.
+
+### 9.3 DPI
+
+- Manifest: PerMonitorV2. Qt 6.8.3 does all scaling; the app only sets the rounding policy to
+  Round (4.1) so every logical pixel value in this document is multiplied by an integer factor
+  (1 at 100%/125%, 2 at 150%-250%, ...).
+- App-side DPI code: (a) the tray bitmap is sized `16 * primaryScreen.devicePixelRatio` with font
+  `8pt * dpr` (2.1); (b) icons are QIcons with `@2x` variants (16/32 px; `_big` 32/64 px) selected
+  by Qt; (c) FUN_0059fb40(16, 0) scales the size of placeholder pixmaps. Nothing else is
+  DPI-aware in app code; there is no WM_DPICHANGED handling of its own.
+
+---------------------------------------------------------------------------------------------------
+## 10. Summary of UNKNOWN / INFERRED items
+
+| # | Item | What was tried |
+|---|---|---|
+| 1 | Worker polling period (UI refresh rate) | UI has no timer; signals come from FanControl.cpp threads (not in scope read) |
+| 2 | Window-title %3 and zip-name %1 (assumed machine model id) | field `app+0x48 -> +4`, also logged by printSysInfo; origin in sysinfo_win.cpp not read |
+| 3 | Order/content of the fan-dialog sensor combo | list supplied by a callback from FUN_00467da0; insertion loop read, source list not traced |
+| 4 | Role of the OK button in the fan dialog; whether `labelTitle` is hidden | arguments not present in decompilation |
+| 5 | Preferences dialog width formula | FUN_005bc8f0 sums toolbar button widths; constants lost in decompilation |
+| 6 | About dialog: which label gets the licence/trial text | label pointers lost; licence-related |
+| 7 | Save-preset name validation rule | FUN_00470c30 not read |
+| 8 | Log sink mode (append/truncate/rotation) | sink factory FUN_005536e0 not traced into spdlog |
+| 9 | `AppFirstRun` registered default constant | push not visible; behaviour "non-zero when absent" is certain |
+| 10 | DWM attribute used for dark title bars | FUN_00627e10 calls through a function pointer table |
+| 11 | FUN_00438b10 predicate gating the rate-me box | licence-state code, intentionally not analysed |
+| 12 | Unreferenced auto-size function FUN_00462d90 | identical logic is inlined in FUN_00467390; standalone copy has no callers |
