@@ -5,7 +5,7 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE,
     REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
 };
 
@@ -119,6 +119,34 @@ impl Key {
     pub fn delete(&self, name: &str) -> bool {
         unsafe { RegDeleteValueW(self.0, wide(name).as_ptr()) == ERROR_SUCCESS }
     }
+}
+
+/// Reads a string value from `HKLM\<path>` without opening the key for writing.
+pub fn read_machine_string(path: &str, name: &str) -> Option<String> {
+    let (path, name) = (wide(path), wide(name));
+    let mut size = 0u32;
+    let query = |buf: *mut u8, size: &mut u32| unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            path.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            null_mut(),
+            buf.cast(),
+            size,
+        )
+    };
+    if query(null_mut(), &mut size) != ERROR_SUCCESS {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if query(buf.as_mut_ptr(), &mut size) != ERROR_SUCCESS {
+        return None;
+    }
+    buf.truncate(size as usize);
+    let units = utf16_units(&buf);
+    let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+    Some(String::from_utf16_lossy(&units[..end]))
 }
 
 impl Drop for Key {

@@ -425,7 +425,7 @@ sensor-name resolver used by `FanControlMode::fromString` is installed here.
      `loadFansProfiles`; and if the model is not fan-less (`FUN_004b28c0`) **and** the dynamic app
      property `win-no-support` is unset (equals an invalid QVariant): `profileList->load()`
      (`FUN_00453b50`, §2.5) and `applyFanProfileToSMC(currentProfile, false)` (§3.5).
-  4. If `stop` is not set → emit signal #3 `FUN_004c8880(false)` (initial load finished).
+  4. If `stop` is not set → emit signal 0 `initFinished(uint8_t)` with argument 0 (`FUN_004c8880`).
      `initDone.set()`. Log `initialLoadThread finished`.
   (An app property `smc-dump` is also read at the top; its result is not used in this function.)
 * `startThreads` `FUN_0044d7a0` (called from the main window, `FUN_00463200` and `FUN_00467390`):
@@ -554,7 +554,7 @@ do nothing (fans keep their forced state). Otherwise log `yes` and
 * Public mutators that write immediately (all end with
   `applyFanProfileToSMC(currentProfile, false)`): `FUN_004488f0` (set current profile),
   `FUN_0044c7f0` (set one fan's mode, optionally saving to the named preset, §2.6),
-  `FUN_0044a290` (discard unsaved changes), `FUN_0044c510` (reload profiles).
+  `FUN_0044a290` (delete a custom preset, §2.6; re-applies only if the current profile changed), `FUN_0044c510` (reload profiles).
 
 ### 3.6 "Fan mode set by another program" — `checkFansControlModeFromSMC` `FUN_00448980`
 
@@ -584,7 +584,7 @@ loop:
           if m.type == 4: needed.append(m.sensorKey)
       if stop.isSet(): return
       if pause.isSet(): break
-      emit signal #1 (FUN_004c8840)                 # fan updated
+      emit fanUpdate()  (signal 1, FUN_004c8840)    # no arguments seen
   if pause.isSet(): continue loop
   if needsWakeWorkaround and profileList->isCurrentPredefinedAutomatic()   # FUN_00453da0
         and powerSource() == 1 /*on battery*/:      # FUN_0059ea40: GetSystemPowerStatus,
@@ -596,7 +596,7 @@ loop:
       if doUpdate: s->update()                      # virtual slot 3 (vtable+0xc)
       if stop.isSet(): return
       if pause.isSet(): break
-      if doUpdate: emit signal #2 (FUN_004c8bb0)(s.id /*sensor+8*/, s.temperature /*double +0x10*/)
+      if doUpdate: emit sensor_update(s.id /*u32 at sensor+8*/, s.temperature /*double +0x10*/)  # signal 2, FUN_004c8bb0
   if pause.isSet(): continue loop
   r = waitAny([stop, pause], 1500 ms)               # 0x5dc
   if r == 0: return
@@ -635,8 +635,8 @@ predefined Automatic one and the machine is on battery, i.e. at most once per ~1
 ### 3.9 Sensor reload pause — `FUN_0044d2b0`
 
 While `pausedCount != 0`: `sleep_for(10 ms)` and `qDebug() << "wait!"`. Then `resume.reset()`,
-`pause.set()`, `pauseAck.wait(INFINITE)`; emit signal #5 (`FUN_004c8c10`),
-`sensorProvider->clear()`, `sensorProvider->load()`, emit signal #6 (`FUN_004c8c30`); finally
+`pause.set()`, `pauseAck.wait(INFINITE)`; emit signal 4 `sensorsReloadBegin` (`FUN_004c8c10`),
+`sensorProvider->clear()`, `sensorProvider->load()`, emit signal 5 (the one after `sensorsReloadBegin`, `FUN_004c8c30`); finally
 `pause.reset()`, `pauseAck.reset()`, `resume.set()`. Both worker threads park in
 `resume.wait(INFINITE)` meanwhile; `pauseAck` is set when the number of parked threads equals
 1 + (control thread running ? 1 : 0).
@@ -647,7 +647,7 @@ While `pausedCount != 0`: `sleep_for(10 ms)` and `qDebug() << "wait!"`. Then `re
 
 Body: `SetThreadPriority(GetCurrentThread(), -2)` (`FUN_0059fb20`); then loop:
 `v = provider->vfunc1()` (u8; provider pointer is `*(app+0x48)`); if `v != cpuUsage`
-(member +0x3b3, initial 0xFF) → store it and emit signal #0 `cpuUsageUpdated(uchar)`
+(member +0x3b3, initial 0xFF) → store it and emit signal 3 `cpuUsageUpdated(uint8_t)`
 (`FUN_004c8800`); `stop.wait(1000 ms)`; exit when `stop` is set. Period 1000 ms.
 
 In this Windows build the thread is dead code:
@@ -662,4 +662,244 @@ In this Windows build the thread is dead code:
 UNKNOWN: what the provider at `app+0x48` would measure (its vtable was not located). A
 reimplementation can omit the thread; the log line in `stopAndWaitForFinished` always reports
 `m_ThreadCpuUsage = false`.
+
+---------------------------------------------------------------------------------------------------
+
+## 2. FanProfile and QFanProfileList
+
+### 2.1 FanProfile (0x20 bytes) / FanProfilePredefined (0x24 bytes)
+
+| off  | type | meaning |
+|------|------|---------|
+| 0x00 | vptr | `FanProfile::vftable` / `FanProfilePredefined::vftable`; slot 0 = deleting dtor, slot 1 = `getName()` |
+| 0x04 | ptr  | cached translator pointer (predefined names only) |
+| 0x08 | QString | name |
+| 0x14 | QList<FanControlMode> | one mode per fan (d / ptr / size at 0x14 / 0x18 / 0x1c) |
+| 0x20 | u8 | *Predefined only*: id, `0` = Automatic, `1` = Full blast (ctor default 0xFF) |
+
+* Default ctor `FUN_00451430`: empty name, no modes.
+* Copy ctor `FUN_00451100` and assignment `FUN_004516d0`/`FUN_004517f0`: copy modes and name;
+  **if the resulting name is empty it becomes the literal `UNSAVED`**.
+* Named ctor `FUN_00451270(modes, name)`: name with every `|` replaced by `-`.
+* `setMode(i, mode)` `FUN_00452760`; `mode(i)` `FUN_00452470` (no bounds check).
+* `operator==` `FUN_00451730`: same number of modes and every pair equal per §1.2. **Names are
+  not compared.**
+* `isValid()` `FUN_004525d0`: `modes.size() == fanCount` (static u8 `DAT_0089eec0`, set when
+  the predefined presets are built) **and** `getName()` non-empty **and** no mode has type 0.
+* Predefined `getName()` `FUN_004524d0`: id 0 → translation of `Presets/presetAutomatic`
+  (English `Automatic`), id 1 → `Presets/presetFullBlast` (English `Full blast`), else `Invalid`.
+  The base-class `getName()` returning the stored name was not read (inferred from its use in
+  `toString`).
+
+### 2.2 Serialised profile string
+
+Separator `SEP` = `|` (static QString `DAT_0089eec4`, initialiser @004210c0).
+
+`toString()` `FUN_00452820`:
+```
+plain = getName() + "|" + mode[0].toString() + "|" + ... + mode[n-1].toString()
+        (built with a trailing "|" that is then cut off)
+result = Base64( UTF-8(plain) )      # standard alphabet A–Z a–z 0–9 + /, '=' padding (FUN_0055f100)
+```
+`fromString(str)` `FUN_00451850` (FanProfile.cpp):
+1. `plain = fromUtf8( Base64Decode( str.toUtf8() ) )` (`FUN_00556130`; behaviour on malformed
+   Base64 not analysed).
+2. `parts = plain.split("|", Qt::SkipEmptyParts, Qt::CaseSensitive)` (flags read from disasm
+   @004519a0).
+3. Expected count = `fanCount + 1` (function-static captured on first call). If
+   `parts.size() != expected` → log (level 3) `Unexpected profile string: {}` (the encoded input)
+   → return an empty profile (which is not valid).
+4. `name = parts[0]`; for each further part `m = FanControlMode::fromString(part)`; if
+   `m.type == 0` → log (level 3) `Unexpected profile mode: {}` (the part) → return an empty
+   profile. Otherwise append.
+5. Return `FanProfile(modes, name)` (named ctor, then copied: empty name → `UNSAVED`).
+
+Because empty parts are skipped, an empty name or an empty mode string changes the count and the
+profile is rejected. Rename (§2.6) stores the new name without replacing `|`, so a preset renamed
+to contain `|` will fail to load next time (count mismatch).
+
+Example, 2 fans, preset "Quiet": fan 0 constant 1800 RPM, fan 1 driven by sensor key `TC0P`
+from 50 °C to 80 °C (the key is illustrative; real keys come from the sensor provider):
+```
+plain  : Quiet|1,1800|2,TC0P,50,80
+stored : UXVpZXR8MSwxODAwfDIsVEMwUCw1MCw4MA==
+```
+
+### 2.3 Predefined presets — `FUN_0044ad60` (called from `loadFansFromSMC`)
+
+Built once per fan load, appended to the predefined list by `FUN_004536a0(modes, id)` (which also
+sets the static `fanCount = modes.size()`):
+
+* id 0 **Automatic**: every fan `Automatic` (type 2).
+* id 1 **Full blast**: every fan `Constant(fan.maxRpm)` (u16 at fan+0x14, as read from SMC at load).
+
+### 2.4 QFanProfileList (QObject, 0x58 bytes, ctor `FUN_00453120`)
+
+| off  | member |
+|------|--------|
+| 0x08 | `FanProfile* current` — points into one of the two lists, or to a heap object owned by the list (the "unsaved" profile) |
+| 0x0c | `QList<FanProfilePredefined*> predefined` |
+| 0x18 | `QList<FanProfile*> custom` |
+| 0x24 | atomic u8 `changed` (consumed by the control thread, §3.3) |
+| 0x28 | std::mutex guarding `current` |
+
+Classification of `current` (`FUN_00452aa0` = pointer search): in `predefined` → predefined
+(`FUN_00453e20`; `FUN_00453da0` = "is Automatic", `FUN_00453e90` = "is Full blast"); else in
+`custom` → custom; else → **unsaved** (`FUN_00453f10`). The UI shows the unsaved state with the
+translation `Presets/presetCurrentUnsaved` = `Custom*` (menu builder `FUN_004c74d0`).
+
+`currentProfile()` `FUN_00453c60` returns a copy (empty profile if `current` is null);
+`predefined(id)` `FUN_00453d40` returns a copy of the predefined entry with that id.
+
+### 2.5 Loading — `load()` `FUN_00453b50`
+
+1. If the app property `pro-version` is set (not an invalid QVariant) →
+   `loadCustomProfiles()` `FUN_00454670`: `list = settings.value("CustomPresets")` as
+   QStringList (`FUN_005989b0`); log `loadCustomProfiles = {}` (count); for each string in order:
+   `p = FanProfile::fromString(s)`; if `p.isValid()` → log `Profile {} is loaded` and append a
+   heap copy to `custom`; else log `Failed to read profile {}` and skip it (so indices of later
+   presets shift). Without `pro-version` the custom list stays empty.
+2. Restore the active preset `FUN_00453fa0`: `candidate` = copy of predefined Automatic;
+   `s = settings.value("ActivePreset").toString()`.
+   * `s` empty → legacy migration `FUN_00454350`: modes = `fanCount` × Invalid; for each fan `i`
+     read `settings.value("Fan_%1")` (i decimal, `Fan_0`, `Fan_1`, …; the pre-preset per-fan
+     format, value = a FanControlMode string of §1.2); if non-empty and it parses to type != 0,
+     store it. Build `FanProfile(modes, "old_guy")`. If that profile `isValid()` (all fans had a
+     parseable entry) → `candidate` = it. **`old_guy` is therefore the internal name of the
+     profile synthesised from legacy `Fan_N` values**; since it normally matches no list entry it
+     becomes the unsaved profile and is written back as `Unsaved:…` by step 3.
+   * else if `s` contains `:` → `kind = s.left(idx)`, `value = s.mid(idx+1)`
+     (first `:` only; exact case-sensitive compares):
+     * `Predefined` → the predefined entry whose `id == value.toUInt()`; none → keep Automatic.
+     * `Custom` → `n = value.toUInt()`; if `custom.size() != 0 && n < custom.size()` →
+       `custom[n]`; else keep Automatic.
+     * `Unsaved` → `p = FanProfile::fromString(value)`; if `p.isValid()` → `p`.
+     * anything else, or no `:` → keep Automatic.
+3. `setCurrentProfile(candidate)` (§2.6) — which also writes the settings back.
+
+### 2.6 Mutations
+
+`setCurrentProfile(p)` `FUN_004559b0` (also the Qt slot, moc index 1):
+1. If `current` is the unsaved (owned) object → delete it. `current = null`.
+2. Scan `predefined`, then (only if nothing matched) `custom`, for entries with `entry == p`
+   (**modes only**); the loops do not break, so the *last* equal entry of the first list that
+   has a match wins.
+3. No match → `current = new FanProfile(p)` (unsaved; keeps `p`'s name, `UNSAVED` if empty).
+4. `changed = 1`.
+5. Persist: if `pro-version` is set → `saveCustom()`; always `saveActive()`. Emit
+   the list's change signal (signal 0, `FUN_004cea70`; its real name was not recovered — called
+   `currentChanged` below; the presets widget consumes it in `slotProfilesChanged`).
+
+Consequence: editing one fan of preset "Quiet" (via `FUN_0044c7f0`) yields an unsaved profile
+still named `Quiet`; editing it back to the original values snaps back to the saved preset.
+
+`saveActive()` `FUN_00454f70`: skipped entirely when the app property `win-no-support` is set or
+`current` is null. Otherwise `settings.setValue("ActivePreset", "%1:%2")` with
+* predefined → `Predefined:<id>` (`Predefined:0`, `Predefined:1`)
+* custom → `Custom:<index in the custom list>` (decimal)
+* unsaved → `Unsaved:<toString() of §2.2>`
+
+`saveCustom()` `FUN_00455210`: `settings.setValue("CustomPresets", QStringList)` with
+`toString()` of every custom preset in list order (`FUN_00599bb0`).
+
+Save unsaved as preset `FUN_00455640(name)` (slot, moc index 2; also called from
+`FUN_0044c7f0` when the dialog's "save to current preset" box is ticked): under the mutex, look
+for a custom preset whose `getName()` equals `name` exactly. Found → replace its modes with the
+current profile's modes, delete the old `current` object, `current` = that preset. Not found →
+set `current.name = name` (raw) and append `current` itself to `custom`. Then persist (custom if
+`pro-version`, active always) and emit `currentChanged`.
+
+Rename `FUN_00454e90(profile, newName)` (slot, moc index 3): first custom preset whose modes
+equal `profile` gets `name = newName` (no `|` filtering); persist (`FUN_00455560`); emit.
+
+Delete `FUN_004537e0(profile)` (via `QFanControl` `FUN_0044a290`): index = first custom preset
+whose modes equal `profile` (no "not found" handling); if the current profile equals `profile` →
+with signals blocked `setCurrentProfile(predefined Automatic)`; delete and remove the entry;
+persist; emit. Custom indices after it shift down, and `ActivePreset` is rewritten in the same
+call, so a stored `Custom:<n>` stays consistent.
+
+Clear `FUN_00453570`: persist first, then delete the unsaved object and every list entry.
+
+All identity lookups for rename/delete are by mode equality, so two custom presets with identical
+modes are indistinguishable (the first one is affected).
+
+### 2.7 Registry picture
+
+QSettings native format, `HKCU\Software\CrystalIdea Software\Macs Fan Control`
+(the settings initialiser `FUN_00433790` passes organisation `CrystalIDEA Software`, application
+`Macs Fan Control`):
+
+```
+ActivePreset   REG_SZ        Custom:0
+CustomPresets  REG_MULTI_SZ  UXVpZXR8MSwxODAwfDIsVEMwUCw1MCw4MA==
+                             (one string per preset, in list order)
+```
+Other legal `ActivePreset` values: `Predefined:0`, `Predefined:1`,
+`Unsaved:VU5TQVZFRHwwfDEsMjQwMA==` (= `UNSAVED|0|1,2400`).
+Legacy (read-only, only when `ActivePreset` is missing/empty): `Fan_0` = `1,2400`,
+`Fan_1` = `2,TC0P,50,80`, …
+
+UNKNOWN: the REG_MULTI_SZ type was not verified in the QSettings wrapper (`FUN_00599bb0`), it is
+what Qt produces for a QStringList; whether the `Fan_%1` read happens inside a QSettings group —
+the read call (`FUN_005988a0`) is given the bare key, but `FUN_00433790` also touches the names
+`Machine`, `TempSensors` and `Fan_%1` through `FUN_00597f80`, which was not analysed. No
+reference to a group literally named `Fans` was seen in the functions read.
+
+---------------------------------------------------------------------------------------------------
+
+## 5. Constant-RPM validation and min == max
+
+No clamping or validation of a constant RPM exists in the fan-control layer:
+
+* `FanControlMode::fromString` stores `toInt()` unchanged (§1.2);
+* `applyFanProfileToSMC` / `setFanSpeed` pass `mode.rpm` (or the sensor algorithm's output)
+  straight to `Service::setFanRPM(i, 3, rpm)` (§3.5). Anything `setFanRPM` does with the value
+  belongs to the SMC-service spec.
+
+The only range enforcement is the Qt widgets of the fan dialog (`FUN_0043b540`, dialog ctor
+`FUN_00439f90`):
+
+* constant slider (dialog+0xc0) and spin box (+0xc4): minimum = `fan.minRpm`, maximum =
+  `fan.maxRpm`. If **Ctrl+Shift** are both held when the dialog is constructed (dialog+0x26,
+  `QGuiApplication::keyboardModifiers() & 0x06000000`), the minimum is `0` instead.
+* initial value: `mode.rpm` if the fan's mode is Constant, else the fan's current RPM (Qt clamps
+  it into the range).
+* sensor-based spin boxes: start temperature (+0xd0) and max temperature (+0xa8) both ranged
+  `conv(20)`..`conv(100)` where `conv` = `FUN_004bd040` (display-unit conversion); the max box's
+  minimum is then raised to `start + 8` (or `start + 14` when `FUN_004bd1e0()` is true —
+  presumably Fahrenheit display) by `FUN_0043b000` / `FUN_0043b040`, so `maxT > startT` and the
+  division in §4 is never by zero for values created by the UI.
+
+min == max: **no special-case code was found** (searched: Fan struct helpers 0x458430–0x458450,
+`loadFansFromSMC`, the control thread, the fan dialog, strings containing min/max, and a pattern
+search for min/max field comparisons in the decompilation). The observable behaviour simply falls
+out of the generic code: Full blast = `Constant(max)` = `Constant(min)`; the dialog slider has an
+empty range; in §4 `step = 0`, every band is `[min, min]`, the first sample sets `rpm = min`
+(tendency Increase, half), the next compute step clamps to `hi = min` and enters DoNothing, so the
+output is `min` once and then every 31 s. UNKNOWN whether the main-window table hides or disables
+the control button for such fans (UI code not read).
+
+---------------------------------------------------------------------------------------------------
+
+## UNKNOWN / not determined (consolidated)
+
+1. Where the model identifier is stored into the app descriptor (`app+0x38`) and the SMBIOS
+   parsing inside `FUN_0058e0d0` (§6.4) — consumers and sources were read, the glue was not.
+2. `Service::setFanRPM` / `setFansControlModes` / `getFanName` internals incl. any clamping and
+   the SMC-side fallback fan name (out of scope; only call sites are specified).
+3. CPU-usage provider (`app+0x48`) — thread is unreferenced dead code in this build (§7).
+4. `waitAny` result when both `stop` and `pause` are signalled (`FUN_0055a810`); callers only
+   distinguish 0 from non-0 and re-check `stop` inside their loops.
+5. Behaviour of `FanControlMode::fromString` on an empty string or on `1…` without a comma, and
+   of `FanProfile::fromString` on invalid Base64 (undefined / not analysed).
+6. `step` when `maxT == startT` (float→int conversion of ±inf); UI prevents it (§5).
+7. Initial content of `lastSetTime` in the sensor state before the first reset (ctor leaves it
+   uninitialised).
+8. Registry value type of `CustomPresets` and group context of the legacy `Fan_%1` keys (§2.7).
+9. `FUN_004348f0` ("helper tool installed", gate for the control thread) and the app properties
+   `pro-version`, `win-no-support`, `smc-dump` — where they are set was not traced.
+10. Callers of the restart path `FUN_0044ca80` and of the standalone throttled re-apply
+    `FUN_0044e310` (no static references found).
+11. The binary's own version literal near the exit path is `1.5.21` (string @00755ec4), not
+    1.5.20; noted only as a discrepancy with the stated version.
 

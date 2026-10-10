@@ -436,3 +436,141 @@ Presets block (FUN_004be7c0):
 "Uninstall..." (`TrayMenu/itemUninstall`) is **not** added on Windows (string not referenced by
 FUN_004bfa70). No item has an icon. The tray icon is hidden at shutdown
 (FUN_00463330 -> FUN_004bf730(0) -> `QSystemTrayIcon::setVisible(false)`).
+
+---------------------------------------------------------------------------------------------------
+## 3. ChangeControlModeDialog (`QChangeControlModeDialog`)
+
+Constructor FUN_00439f90 (base `QDialogEx` FUN_0059e850), setupUi FUN_0043d6b0, designer texts
+FUN_0043cdc0, runtime texts FUN_0043c6e0, populate FUN_0043b540, connections FUN_0043bc90, buttons
+FUN_0043b9b0. Opened modally from `slotShowFanDialog` (FUN_00467da0) for one fan.
+
+### 3.1 Window
+
+- Title: tr("FanControlDialog/title").arg(fan name) = "Change fan control for the '%1' fan".
+- Window icon: that fan's icon (FUN_00439f90).
+- setupUi `resize(465, 259)`; after populating: `adjustSize()` then `setFixedSize(size())` - the
+  dialog is **not resizable** and its size is whatever the layout needs.
+- Every optional widget gets `sizePolicy.setRetainSizeWhenHidden(true)` (FUN_0059e7f0), so hiding
+  the sensor controls does not change the dialog size.
+
+### 3.2 Layout tree (FUN_0043d6b0). Margins/spacing are not set explicitly (Qt style defaults).
+
+- `verticalLayout` QVBoxLayout
+  - `labelTitle` QLabel, textFormat raw value 2, alignment 0x84 (centre). Designer text `%title%`.
+    The constructor calls `setVisible(...)` on it (virtual +0x2C on member +0x90, FUN_00439f90);
+    the argument is not visible in the decompilation. INFERRED hidden on Windows, because no code
+    ever replaces the `%title%` placeholder text and the title is put in the window caption.
+  - `gridLayout` QGridLayout (rows x columns):
+    - (row 0, col 0) `radioConstant` QRadioButton - tr("FanControlDialog/radioConstant") "Constant RPM value"
+    - (row 0, col 1, colspan 2) `horizontalLayout_2`: `sliderRPM` QSlider (Horizontal), then
+      `spinConstant` QSpinBox: minimumSize 40x0, maximumSize 60x16777215, wrapping false, frame
+      true, buttonSymbols 2 (NoButtons), no suffix, no special value text
+    - (row 1, col 0) `radioSensor` QRadioButton - tr("FanControlDialog/radioSensor") "Sensor-based value"
+    - (row 1, col 1, colspan 2) `comboSensor` QComboBox, `maxVisibleItems = 15`
+    - (row 2, col 0, colspan 2) `labelIncrease` QLabel, wordWrap true -
+      tr("FanControlDialog/staticIncrease") "Temperature that the fan speed will start to increase from:"
+    - (row 2, col 2) `horizontalLayout_3`: spacer 40x20 (Expanding, Minimum), `spinIncrease` QSpinBox,
+      `labelDegree1` QLabel = "°C" / "°F" (FUN_004bce30)
+    - (row 3, col 0, colspan 2) `labelMax` QLabel - tr("FanControlDialog/staticMax") "Maximum temperature:"
+    - (row 3, col 2) `horizontalLayout_4`: spacer 40x20 (Expanding, Minimum), `spinMax` QSpinBox,
+      `labelDegree2` QLabel = "°C" / "°F"
+  - `checkSaveProfile` QCheckBox
+  - `buttonBox` QDialogButtonBox, no standard buttons; code adds (FUN_0043b9b0):
+    OK = QPushButton(tr("Common/buttonOK")) [member +0x1c] -> `OnApply` (FUN_0043ab90);
+    Cancel = QPushButton(tr("Common/buttonCancel")) -> `OnCancel` (FUN_0043ae30 = `done(0)`).
+    One `setAutoDefault(true)` call is made on the member +0x1c button and one
+    `addButton(button, 1 = RejectRole)` call is visible. UNKNOWN: the role constant used for the
+    other button (second addButton not visible in the decompilation; AcceptRole for OK assumed).
+  - `labelFooter` QLabel, wordWrap true, hidden unless the min==max warning applies (3.6)
+- Tab order: radioConstant -> spinConstant -> radioSensor -> comboSensor -> spinIncrease -> spinMax.
+
+### 3.3 Ranges and initial values (FUN_0043b540)
+
+Fan record used: `min` (int16 @+0x1e), `max` (@+0x20), a third value @+0x1c.
+
+| Widget | Min | Max | Initial value |
+|---|---|---|---|
+| sliderRPM | fan min - or **0 if Ctrl+Shift were both held when the dialog was opened** (`QGuiApplication::keyboardModifiers()` has both 0x04000000 and 0x02000000; flag at this+0x26) | fan max | if the starting mode is Constant: its RPM; otherwise the fan record value @+0x1c (INFERRED: current RPM) |
+| spinConstant | same as slider min | fan max | same as slider |
+| spinIncrease | `toDisplay(20)` | `toDisplay(100)` | see below |
+| spinMax | `toDisplay(20)` | `toDisplay(100)` | see below |
+
+`toDisplay(c)` = c when `Fahrenheit == 0`, else `c*9/5+32` truncated to int (FUN_004bd040); i.e.
+20..100 °C or 68..212 °F. Single step is Qt's default (1) for all spin boxes and the slider; no
+tick marks, no page-step override.
+
+Starting mode: the fan's current mode. If the fan is currently Automatic, the dialog starts from
+the mode last applied through this dialog for that fan during this run (static per-fan array
+`DAT_0089ed28`, FUN_00439f90 / FUN_0043ab90).
+
+- starting mode Constant (3) or Automatic (2): `radioConstant` checked.
+- starting mode Sensor (4): `radioSensor` checked; if its sensor id is found in the combo
+  (`findData`), select it and set spinIncrease = toDisplay(start temp), spinMax = toDisplay(max temp).
+- any other starting mode: no radio checked -> OK disabled.
+
+### 3.4 Sensor combo
+
+One item per sensor supplied by the caller: `insertItem(count, icon, name, userData = sensor id
+string)` in the order of the supplied list. INFERRED: the list is the same sensor list/order as
+the sensors table (without the separator); the callback that fills it comes from FUN_00467da0
+and was not traced item by item. Each sensor record also carries a default start temperature
+(@+0x1c) and default max temperature (@+0x20), in Celsius.
+
+### 3.5 Enabling logic and validation
+
+`OnFanControlChanged` (FUN_0043ae40, on either radio `toggled`):
+- First hide (`setVisible(false)`) comboSensor, spinConstant, sliderRPM, labelIncrease, labelMax,
+  spinIncrease, spinMax, labelDegree1, labelDegree2. OK enabled = `!warningFlag` (this+0x24).
+- radioConstant checked: show spinConstant + sliderRPM; focus spinConstant and `selectAll()`.
+- radioSensor checked: show comboSensor, labelIncrease, labelMax, spinIncrease, spinMax, both degree
+  labels; focus comboSensor; run `OnSensorChanged`.
+- neither: OK disabled.
+(Controls are shown/hidden, not enabled/disabled; their space is retained.)
+
+Slider <-> spin sync: `sliderRPM.valueChanged -> spinConstant.setValue`; slider `valueChanged`
+also focuses spinConstant and selects all (FUN_0043c4e0); `spinConstant.valueChanged` sets the
+slider value with the slider's signals blocked (FUN_0043c540).
+
+`OnSensorChanged` (FUN_0043b040, on `comboSensor.currentIndexChanged`):
+- if the selected sensor is the one of the fan's current Sensor mode: keep the spin values and set
+  `spinMax.minimum = spinIncrease.value + D`;
+- otherwise load that sensor's defaults: spinIncrease = toDisplay(default start),
+  spinMax = toDisplay(default max).
+
+`OnIncreaseValueChanged(v)` (FUN_0043b000, on `spinIncrease.valueChanged`):
+`spinMax.setMinimum(v + D)`.
+
+`D` = **8** when Celsius, **14** when Fahrenheit: the maximum temperature must always be at least
+8 °C (14 °F) above the start temperature; Qt clamps spinMax's value up when its minimum rises.
+There is no other validation and no error message.
+
+### 3.6 min == max warning (FUN_0043d140, FUN_0043d4c0)
+
+If the fan's `min == max`: OK is disabled permanently (flag this+0x24 = 1) and `labelFooter` is
+shown with rich text
+`<table><tr><td></td><td><img src=":/Resources/warning.png"/></td><td valign="middle">&nbsp;TEXT</td></tr></table>`
+where TEXT = tr("FanControlDialog/statusWarning").arg(min) ("Something is wrong - min/max fan
+values are equal (%1).<br/> Please make sure to uninstall any other fan-controlling software and
+to reset the SMC."). The same text is the RPM-cell tooltip in the main table (1.4).
+
+### 3.7 "Save to the current preset" checkbox (FUN_0043c6e0)
+
+Shown only when the caller supplies a non-empty preset name, which FUN_00467da0 does only when the
+active preset is a **custom** preset (FUN_00453e20). Text
+tr("FanControlDialog/saveToCurrentPreset").arg(name) = "Save to the current preset ('%1')".
+Otherwise hidden. Unchecked by default.
+
+### 3.8 OK (`OnApply`, FUN_0043ab90)
+
+- radioConstant: result mode = Constant(spinConstant.value) (FUN_0044f7a0).
+- radioSensor with a non-empty selected sensor id: result mode = Sensor(id,
+  start = toCelsius(spinIncrease.value), max = toCelsius(spinMax.value)) (FUN_0044fd40;
+  FUN_004bcd60 converts display units back to Celsius).
+- `saveToPreset` (this+0x25) = checkbox visible && checked.
+- The result is stored in the dialog, remembered in the per-fan static array, and the dialog is
+  finished with result 1.
+- Caller (FUN_00467da0 / FUN_00464d10): if the result mode differs from the fan's current mode
+  (FUN_0044f5a0 compare) it is applied with FUN_0044c7f0 (set fan mode, with the save-to-preset
+  flag); the fan row is refreshed. If not saved to a preset the profile state becomes "Custom*".
+
+Cancel / closing the dialog: no change.
