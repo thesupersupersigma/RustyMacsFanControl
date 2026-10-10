@@ -1,4 +1,5 @@
 mod lang;
+mod registry;
 
 fn main() {
     let lang = lang::Language::english();

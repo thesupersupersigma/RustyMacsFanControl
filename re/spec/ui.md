@@ -333,3 +333,106 @@ FUN_00467950, 16 slotFollowTwitter FUN_00467160, 17 slotCreateTechInfoZip FUN_00
 FUN_00466f10, 21 uninstallApp FUN_00468ca0, 22/23 letUserSelectProfileName FUN_00464eb0,
 24 deactivateLicense FUN_004643d0, 25 showLicenseWarning FUN_00466a40.
 
+
+---------------------------------------------------------------------------------------------------
+## 2. Tray icon (`QTrayIcon` -> `QTrayIconPlatform` -> `QTrayIconWin`)
+
+`QTrayIcon` (FUN_004bda80) owns a QMenu (member +0xc) and a platform object `QTrayIconWin`
+(FUN_004c0640, member +0x18) which wraps a plain **QSystemTrayIcon** (member +8). There is no
+direct Shell_NotifyIcon code in the app; everything goes through Qt.
+
+### 2.1 Icon image (FUN_004c08a0 = QTrayIconWin::update)
+
+Windows has only **two** looks; the macOS options (colored / monochrome / none, fan RPM text,
+two-line layout) do not exist in the Windows code path (see 6.3: the Windows "Tray icon" tab only
+has the sensor combo).
+
+| Case | Image |
+|---|---|
+| No tray sensor selected (`traySensor` empty or naming a sensor that no longer exists, FUN_004bf1b0) | QIcon built from `:/Resources/tray.png` at 16x16 and `:/Resources/tray@2x.png` at 32x32 (FUN_0045d9f0) |
+| Tray sensor selected (flag bit 4 set by FUN_004bf940) | generated bitmap, below |
+
+Generated bitmap:
+- `dpr = QGuiApplication::primaryScreen()->devicePixelRatio()`
+- `QImage(size = int(dpr * 16.0) square, Format 5 = Format_ARGB32)` (constants 16.0 at 0x00760210)
+- painter font = painter default font with `setPointSize(int(dpr * 8.0))` (constant 8.0 at 0x00760200)
+- `setRenderHint(1 = TextAntialiasing... raw value 1, true)`
+- pen: solid brush of Qt::GlobalColor 3 (**white**), width 1.0
+- `fillRect(whole image, Qt::GlobalColor 0xF)` = **Qt::darkBlue (#000080)** - opaque background
+- text = `QString::number((int)round(value))` where value is the sensor temperature **in Celsius**
+  (no Fahrenheit conversion here; the preferences tab shows "(Celsius only)"), drawn with
+  `drawText(rect, 0x84 = AlignHCenter|AlignVCenter, text)`. No degree sign, no unit.
+- `QIcon(QPixmap::fromImage(image))` -> `QSystemTrayIcon::setIcon`.
+
+No dark-mode variant is chosen for the tray on Windows: `tray_white` / `tray_grey` resources are
+not referenced by the Windows icon functions (only `tray.png`/`tray@2x.png`, FUN_0045d9f0 and
+FUN_0045db90). The icon is refreshed whenever the selected sensor's value changes
+(FUN_004bf700 -> FUN_004bf940) and when preferences change (FUN_004bf920).
+
+### 2.2 Tooltip (FUN_004c04a0)
+
+For each fan one line `"%1 - %2 RPM\n"` (%1 fan name, %2 current RPM, decimal), concatenated and
+`trimmed()`; set with `QSystemTrayIcon::setToolTip`. Rebuilt on every `slotFanUpdate`
+(FUN_00467040 -> FUN_004bef90) . Empty if the fan list is not ready.
+
+### 2.3 Clicks
+
+- `QSystemTrayIcon::activated(reason)` is handled by FUN_004c0810: only `reason == 2`
+  (**DoubleClick**) does something: emits `showMainWindow` (FUN_004ca510) -> `slotRestore`.
+  Single left click (Trigger) does nothing.
+- Right click: Qt shows the context menu set via `setContextMenu(menu)` (FUN_004c0be0).
+- The menu's default (bold) action is "Show Macs Fan Control" (`setDefaultAction`).
+
+### 2.4 Tray menu (FUN_004bfa70, rebuilt on profile/fan/preference changes)
+
+`notPro` = app property `pro-version` unset. `ready` = QTrayIcon member +0x14 (fan list
+initialised). `backendOk` = `backend->vtbl[0x20]()` (FUN_004348f0).
+
+| # | Item | Notes |
+|---|---|---|
+| 1 | tr("TrayMenu/itemShow") "Show Macs Fan Control" | default action; -> `showMainWindow` |
+| 2 | separator | |
+| 3 | **Fans block** and **Presets block** - only if `ready`. Order: Pro: presets block (if `backendOk`) then fans block. Not Pro: fans block then presets block (if `backendOk`). | |
+| 4 | tr("MainWindow/buttonPreferences") "Preferences..." | -> `showPreferences` (FUN_004ca530) |
+| 5 | separator | |
+| 6 | submenu tr("TrayMenu/itemMoreLinks") "More" | contents below |
+| 7 | separator | |
+| 8 | tr("TrayMenu/itemExit") "Exit" | -> signal FUN_004ca140 -> `slotExit` |
+
+Fans block (FUN_004be090):
+
+| Item | Notes |
+|---|---|
+| tr("TrayMenu/itemAvailableFans") "Available fans:" | disabled header |
+| per fan: submenu titled `"%1 - %2"` = fan name, **short** mode description (FUN_00450050 with short=1: "Auto", "Constant value of N", "Sensor-based", ...) | actions are in a QActionGroup; action data strings `"<index>:control"` / `"<index>:reset"`, dispatched by `slotProcessFanAction` (FUN_004bf750) to `showFanDialog(index)` / `resetFanMode(index)` |
+| - tr("MainWindow/popupMenuItemControl") "Change control..." | always |
+| - separator + tr("MainWindow/popupMenuItemReset") "Reset to automatic control" | only if the fan's mode != 2 (automatic) |
+| separator | after the last fan |
+
+Presets block (FUN_004be7c0):
+
+| Item | Notes |
+|---|---|
+| tr("TrayMenu/itemFanPresets") "Fan presets:" | disabled header |
+| one action per predefined preset ("Automatic", "Full blast") | active one checkable+checked; -> `setActiveProfile` |
+| one action per custom preset | only if Pro and at least one exists; active one checked; -> `setActiveProfile` |
+| submenu tr("Presets/presetCurrentUnsaved") "Custom*" containing tr("Presets/presetMenuSave") "Save...", separator, tr("Presets/presetMenuDiscard") "Discard (reset all fans to auto)" | only when the state is unsaved (FUN_00453f10); -> `unsavedSave` / `unsavedDiscard` |
+| separator | |
+
+"More" submenu:
+
+| Item | Signal -> main window slot |
+|---|---|
+| tr("TrayMenu/itemUpgradeToPro") "Upgrade to Pro version" + separator | only if `notPro`; FUN_004ca080 -> `slotUpgradeToPro` (license UI - leave out) |
+| tr("MainWindow/buttonAbout") "About..." | FUN_004ca4b0 -> `slotInfoDialog` |
+| tr("TrayMenu/itemCheckForUpdates") "Check for updates..." | FUN_004ca0a0 -> `slotCheckForUpdates` (update checker - leave out) |
+| tr("TrayMenu/itemTechInfoZip") "Create tech zip file..." | FUN_004ca100 -> `slotCreateTechInfoZip` |
+| separator | |
+| tr("TrayMenu/itemRateApp") "Rate on MacUpdate" | FUN_004ca410 -> `slotRateApp` (opens `https://www.macupdate.com/app/mac/47386/macs-fan-control`, sets `RateOnMacupdateSkip=1`, FUN_00467950) |
+| tr("TrayMenu/itemFollowTwitter") "Follow @crystalidea" | FUN_004ca160 -> `slotFollowTwitter` (`https://twitter.com/crystalidea`, FUN_00467160) |
+| separator | |
+| tr("TrayMenu/itemWebsite") "Website" | FUN_004ca180 -> `slotHomePage` (`https://crystalidea.com/?source=fancontrol_win`, FUN_00467200) |
+
+"Uninstall..." (`TrayMenu/itemUninstall`) is **not** added on Windows (string not referenced by
+FUN_004bfa70). No item has an icon. The tray icon is hidden at shutdown
+(FUN_00463330 -> FUN_004bf730(0) -> `QSystemTrayIcon::setVisible(false)`).

@@ -343,3 +343,323 @@ Fan-less models: `FUN_004b28c0(descriptor)` returns true for family 1 (MacBookAi
 {81, 91, 101} (MacBook8,1 / 9,1 / 10,1). When true, `loadFansFromSMC` does nothing at all (no log,
 no SMC access, zero fans).
 
+Otherwise: log `QFanControl::loadFansFromSMC`; `count = Service::getFanCount()` (`FUN_004ad0e0`,
+u8); log `Fans count - {}`; if 0 → log (level 4) `No fans detected!` and return. Else load the
+name list (§6.2), and per fan in index order: resolve name, construct Fan, push to the vector, then
+`FUN_00445b00(i, false)` = three reads through `FUN_004addc0(i, kind, &u16)` (which builds the key
+with `FUN_004afb10(kind, i)` and calls `Service::getFanRPM` `FUN_004adb00`): kind 0 = current,
+kind 1 = min, kind 2 = max (kind 3 = target is the one written by setFanRPM). After all fans:
+build the predefined presets (`FUN_0044ad60`, §2.3) and run `checkFansControlModeFromSMC` (§3.6).
+
+### 6.4 Obtaining the model identifier on Windows — `platform_getMachineName` `FUN_004b35c0`
+
+(sysinfo_win.cpp; logs under the names `platform_getMachineName`, `readFromBIOS`,
+`readFromRegistry`.) Produces `(manufacturer, productName)` by the first source that works:
+
+1. `readFromBIOS` `FUN_004b39c0`: a function-static SMBIOS reader (`FUN_0058e850` →
+   `FUN_0058e0d0`, the only user of `GetSystemFirmwareTable`) exposes two `std::string`s
+   (manufacturer @0x0089f848, product name @0x0089f860; SMBIOS type-1 System Information fields —
+   the parsing itself was not read). Logs `Manufacturer: {}` and `Product Name: {}` when the
+   manufacturer is non-empty. Success iff both strings are non-empty.
+2. else WMI `FUN_0058b820` (`SELECT * FROM Win32_ComputerSystem`, properties `Manufacturer`,
+   `Model`); used if both come back non-empty.
+3. else `readFromRegistry` `FUN_004b3e20`: `HKLM\SYSTEM\CurrentControlSet\Control\SystemInformation`
+   opened with `KEY_READ` (0x20019); values `SystemManufacturer` and `SystemProductName`
+   (REG_SZ, UTF-16); logs both; failure to open logs (level 3) `Unable to open registry key`.
+
+Then: if `manufacturer.indexOf("Apple")` (case-sensitive) != -1 → the model identifier is
+`productName` (e.g. `MacBookPro11,3`); otherwise log (level 3)
+`Manufacturer string doesn't contain Apple ('{}')` and the model identifier is the empty string.
+The descriptor of §6.1 is then built from that string (family/num via `FUN_004b2900`).
+UNKNOWN: the exact place where `platform_getMachineName`'s result is stored into `app+0x38`
+(the app constructor was not traced); the field meanings were recovered from their consumers.
+
+---------------------------------------------------------------------------------------------------
+
+## 3. QFanControl: object, threads, control loop
+
+### 3.1 Object layout (ctor `FUN_00442760`)
+
+| off | member |
+|-----|--------|
+| 0x08 | `QFanProfileList*` (0x58 bytes, §2) |
+| 0x0c | SMC service pointer (copied from `app+0x28`) |
+| 0x10 | `TemperatureSensorProvider*` |
+| 0x14 | object from `FUN_00458a20` (passed to the sensor provider's load/clear; not analysed) |
+| 0x18 / 0x1c | `m_ThreadInit` (std::future state ptr / valid flag) |
+| 0x20 / 0x24 | `m_ThreadUpdate` |
+| 0x28 / 0x2c | `m_ThreadControl` |
+| 0x30 / 0x34 | `m_ThreadCpuUsage` |
+| 0x38 | event `stop` |
+| 0xcc | event `initDone` |
+| 0x160 | event `pause` |
+| 0x1f4 | event `resume` |
+| 0x288 | event `pauseAck` |
+| 0x31c | event `wakeup` |
+| 0x3b0 | atomic u8 `pausedCount` |
+| 0x3b1 | u8 `sleepMode` |
+| 0x3b2 | u8 `userLoggedOut` |
+| 0x3b3 | u8 `cpuUsage`, initial 0xFF |
+| 0x3b4.. | `std::vector<Fan>` |
+
+Events are a home-made manual-reset event (mutex + condvar; `set` = `FUN_0055a610`,
+`reset` = `FUN_0055a600`, `isSet` = `FUN_0055a2e0`, `wait(ms)` = `FUN_0055ae40` where
+`(0xFFFF, 0)` means infinite, `waitAny(vector<Event*>, waitAll=0, ms)` = `FUN_0055aca0` →
+`FUN_0055a810`, returning the index of a signalled event; the callers only test "== 0", i.e.
+"the stop event", everything else incl. timeout means "keep going"). All six are created with
+`FUN_00559f80(0)` (manual reset).
+
+Connections made in the ctor: power-notification object (`FUN_0059ee40`) signals →
+`slotEnteringSleepMode` `FUN_0044d100`, `slotWakeUp` `FUN_0044d5d0`, `slotUserLoggedOut`
+`FUN_0044d420`; sensor provider "sensors changed" signal → `FUN_0044d2b0` (§3.7). The global
+sensor-name resolver used by `FanControlMode::fromString` is installed here.
+
+### 3.2 Start / stop
+
+* `Init` `FUN_004457e0` (called from main-window setup `FUN_00461d00`):
+  `m_ThreadInit = std::async(launch::async, initialLoadThread)`.
+* `initialLoadThread` `FUN_0044b0d0` (thread name `initialLoadThread`), runs once:
+  1. `initDone.reset()`.
+  2. `loadFansFromSMC()` (§6.3), then `sensorProvider->load(smc, this+0x14)` (`FUN_0047e120`).
+  3. If the fan vector is empty → log (level 3) `initialLoadThread - no fans`. Else log
+     `loadFansProfiles`; and if the model is not fan-less (`FUN_004b28c0`) **and** the dynamic app
+     property `win-no-support` is unset (equals an invalid QVariant): `profileList->load()`
+     (`FUN_00453b50`, §2.5) and `applyFanProfileToSMC(currentProfile, false)` (§3.5).
+  4. If `stop` is not set → emit signal #3 `FUN_004c8880(false)` (initial load finished).
+     `initDone.set()`. Log `initialLoadThread finished`.
+  (An app property `smc-dump` is also read at the top; its result is not used in this function.)
+* `startThreads` `FUN_0044d7a0` (called from the main window, `FUN_00463200` and `FUN_00467390`):
+  1. if `m_ThreadUpdate` is not running → `std::async(launch::async, updateThread)`.
+  2. if `m_ThreadControl` is not running: if `app->FUN_004348f0()` is false → log (level 3)
+     `Helper tool is not installed, thread cannot start`; else
+     `std::async(launch::async, controlFanSpeedThread)`.
+  "Running" = future valid and `wait_for(0)` not ready (`FUN_0043fe00`).
+  `m_ThreadCpuUsage` is never assigned anywhere (§7).
+* `stopAndWaitForFinished` `FUN_0044db90` → bool:
+  `stop.set()`; budget = 8000 ms; loop: if none of the four futures is still running → log
+  `stopAndWaitForFinished: Quit OK`, return true. Otherwise log
+  `stopAndWaitForFinished: m_ThreadUpdate = {}, m_ThreadInit = {}, m_ThreadControl = {}, m_ThreadCpuUsage = {}`
+  (booleans "still running"), `sleep_for(200 ms)`, budget -= 200, repeat while budget > 0.
+  On exhaustion: log (level 4) `stopAndWaitForFinished ERROR: ...` (same fields), return false.
+  The app-exit path `FUN_00463330` shows a message box
+  (`Unable to terminate the app in the right way, ...`) when it returns false.
+* Restart path `FUN_0044ca80` (no static caller found; presumably virtual/slot):
+  `blockSignals(true)`, `stopAndWaitForFinished()`, clear fan vector, `sensorProvider->clear()`
+  (`FUN_0047c9e0`), `profileList->clear()` (`FUN_00453570`), `stop.reset()`,
+  `blockSignals(false)`, then `initialLoadThread()` synchronously on the calling thread.
+
+Thread exit ordering: there is no join order; all threads observe the same `stop` event. Only the
+control thread performs an action on exit (`restoreDefaultControl`, §3.4).
+
+### 3.3 controlFanSpeedThread — `FUN_00448f40` (thread name `controlFanSpeedThread`)
+
+`N` = fan count captured once in a function-static u8 on first run.
+
+```
+loop:
+  if pause.isSet():                                  # cooperative pause, see §3.7
+      n = (m_ThreadControl running ? 1 : 0)          # FUN_00440e00(&m_ThreadControl)
+      if ++pausedCount == n + 1: pauseAck.set()
+      resume.wait(INFINITE)
+      --pausedCount
+
+  for i in 0..N:                                     # u8 counter
+      if sleepMode: break
+      profile = profileList->currentProfile()        # copy under the list mutex, FUN_00453c60
+      mode = profile.isValid() ? profile.mode(i) : Invalid      # FUN_004525d0 / FUN_00452470
+      match mode.type:
+        3 (Constant):
+            target  = mode.rpm
+            changed = profileList->changedFlag       # atomic u8 at list+0x24
+            if abs(fan[i].curRpm - target) > 30 or changed:
+                setFanSpeed(i, target)               # §3.5
+                if changed: profileList->changedFlag = 0     # atomic exchange
+        4 (Sensor-based):
+            sensor = sensorProvider->findByKey(mode.sensorKey)   # FUN_0047ef20: first sensor whose
+                                                     # virtual matchesKey() is true and whose
+                                                     # byte flag at sensor+0x50 is 0
+            if sensor == null:
+                fan[i].state.reset()                 # FUN_004506f0
+                log "ControlFanSpeedThread: reset fan mode for {}"   (fan name)
+                p = profileList->currentProfile(); p.setMode(i, Automatic)   # FUN_00452760
+                profileList->setCurrentProfile(p)    # FUN_004559b0 (sets changedFlag, persists, §2.6)
+                applyFanProfileToSMC(profileList->currentProfile(), false)
+            else:
+                t = sensor.temperature               # double at sensor+0x10
+                if t != 0.0:
+                    r = fan[i].update(t, &mode)      # §4
+                    if r != -1: setFanSpeed(i, r)
+        other (Automatic/Invalid): nothing
+      if stop.isSet(): goto EXIT
+
+  if sleepMode:
+      log "ControlFanSpeedThread: sleep mode"
+      for every fan: state.reset()
+      cur        = profileList->currentProfile()
+      sleepProf  = getProfileToApplyForSleepMode()   # §3.8
+      changed    = !(cur == sleepProf)               # FanProfile::operator==, §2.1
+      log "ControlFanSpeedThread: changed = {}"
+      if changed: applyFanProfileToSMC(sleepProf, true)
+      wakeup.wait(INFINITE)                          # NOTE: `stop` is not observed here
+      log "_wakeupEvent triggered"
+      wakeup.reset()
+      if changed:
+          log "Restore previous profile"
+          applyFanProfileToSMC(cur, false)
+
+  if waitAny([stop, pause], 1500 ms) == 0: goto EXIT    # 0x5dc, disasm @00449bfb
+  goto loop
+
+EXIT:
+  restoreDefaultControl()                            # §3.4
+```
+
+The loop period is therefore 1500 ms plus the time spent in SMC I/O. There is no SMC read in this
+thread: `fan[i].curRpm` and the sensor temperature are whatever `updateThread` last stored.
+
+Constant-RPM consequence: a constant target is written once when the profile changes
+(`changedFlag`) and re-written on every 1.5 s pass for as long as the measured RPM differs from
+the target by more than 30 RPM. `changedFlag` is one flag for the whole list, cleared by the first
+constant fan processed; later constant fans in the same pass are only written if their own
+deviation exceeds 30.
+
+### 3.4 restoreDefaultControl — `FUN_0044cc60`
+
+Log `restore default control?`. If `userLoggedOut` **and** `FUN_004b2760(model)` → log `no` and
+do nothing (fans keep their forced state). Otherwise log `yes` and
+`applyFanProfileToSMC(profileList->predefined(0) /*Automatic*/, false)`, i.e. one
+`setFansControlModes` call with every bit clear.
+
+`FUN_004b2760` = family iMac (4) with num in 101..=122 (iMac10,1 … iMac12,2) or num ∈
+{132, 142, 151, 171, 183, 192}.
+
+`slotUserLoggedOut` `FUN_0044d420` only logs `slotUserLoggedOut` and sets `userLoggedOut = 1`
+(never cleared).
+
+### 3.5 SMC writes
+
+* `applyFanProfileToSMC(profile, bool writeConstants)` `FUN_004485b0`:
+  log `Apply profile: ` + profile name. Build `std::vector<bool> forced(fanCount)`; for each fan
+  `forced[i] = (profile.mode(i).type != 2)` — Automatic clears the bit, **every other type
+  including Invalid sets it**. Call `Service::setFansControlModes(forced)` (`FUN_004b05f0`) once.
+  If `writeConstants` and at least one mode is Constant: for each fan with type 3, in index
+  order, `Service::setFanRPM(i, 3 /*target*/, mode.rpm)` (`FUN_004b02e0`).
+  `writeConstants` is true only for the sleep profile (§3.3).
+* `setFanSpeed(i, rpm)` `FUN_00445980`: function-static `lastModesApply` (initialised to
+  now − 3001 ms). If `msecsTo(lastModesApply, now) > 3000` →
+  `applyFanProfileToSMC(currentProfile, false)` and `lastModesApply = now`. Then always
+  `Service::setFanRPM(i, 3, rpm)`. So the forced-mode mask is re-asserted at most every 3 s while
+  RPM writes are happening. (`FUN_0044e310` is the same throttled re-apply as a standalone
+  function sharing the same static; no static caller was found.)
+* Public mutators that write immediately (all end with
+  `applyFanProfileToSMC(currentProfile, false)`): `FUN_004488f0` (set current profile),
+  `FUN_0044c7f0` (set one fan's mode, optionally saving to the named preset, §2.6),
+  `FUN_0044a290` (discard unsaved changes), `FUN_0044c510` (reload profiles).
+
+### 3.6 "Fan mode set by another program" — `checkFansControlModeFromSMC` `FUN_00448980`
+
+Called exactly once, at the end of `loadFansFromSMC` (startup / restart). Log
+`checkFansControlModeFromSMC`; `ok = Service::getFansControlModes(&vector<bool>)`
+(`FUN_004adeb0`). If `!ok` → log (level 4) `Unable to query fans control mode!`. Else for each
+index whose bit is set → log (level 3) `Fan {} mode is set by another program`. If any bit was set
+→ `applyFanProfileToSMC(predefined(0) /*Automatic*/, false)` (reset all fans to automatic).
+There is no periodic detection while running; the running loop simply re-asserts its own mask
+(§3.5).
+
+### 3.7 updateThread — `FUN_0044e460` (thread name `updateThread`)
+
+```
+sensors = sensorProvider->sensors()                 # FUN_0047d750
+first = true
+loop:
+  if pause.isSet(): (same pause protocol as §3.3); sensors = sensorProvider->sensors()
+  visible   = first ? true : mainWindow->isVisible()
+  traySensor = settings.value("traySensor").toString()     # read every pass (FUN_005988a0)
+  needed = []                                       # sensor keys required by the profile
+  for i in 0..N:
+      cur = getFanRPM(i, kind 0)                    # FUN_004addc0(i, 0, &u16)
+      fan[i].set(cur, 0xFFFF, 0xFFFF)               # min/max untouched
+      if !visible:
+          m = profileList->currentProfile().mode(i)
+          if m.type == 4: needed.append(m.sensorKey)
+      if stop.isSet(): return
+      if pause.isSet(): break
+      emit signal #1 (FUN_004c8840)                 # fan updated
+  if pause.isSet(): continue loop
+  if needsWakeWorkaround and profileList->isCurrentPredefinedAutomatic()   # FUN_00453da0
+        and powerSource() == 1 /*on battery*/:      # FUN_0059ea40: GetSystemPowerStatus,
+        wakeSMCOnMacBookWorkaround()                #   ACLineStatus 0→1, 1→0, else 2
+  for s in sensors:
+      doUpdate = true
+      if !visible:
+          doUpdate = (s.key == traySensor) or needed.contains(s.key)   # key QString at sensor+0x24
+      if doUpdate: s->update()                      # virtual slot 3 (vtable+0xc)
+      if stop.isSet(): return
+      if pause.isSet(): break
+      if doUpdate: emit signal #2 (FUN_004c8bb0)(s.id /*sensor+8*/, s.temperature /*double +0x10*/)
+  if pause.isSet(): continue loop
+  r = waitAny([stop, pause], 1500 ms)               # 0x5dc
+  if r == 0: return
+  first = false
+```
+
+Period 1500 ms. When the main window is hidden only the fans' current RPM, the tray sensor and
+the sensors referenced by sensor-based modes are refreshed.
+
+Wake workaround: `needsWakeWorkaround` (function-static, computed once) = MacBookPro with num 121
+(MacBookPro12,1) or MacBookAir with num ∈ {62, 71, 72} (MacBookAir6,2 / 7,1 / 7,2).
+`wakeSMCOnMacBookWorkaround` `FUN_0044f1d0`: function-static `lastWake` initialised to
+now − 10001 ms; if `msecsTo(lastWake, now) > 10000`: log `Waking SMC system`;
+`setFansControlModes(all bits = 1)`; `sleep_for(500 ms)`; `setFansControlModes(all bits = 0)`;
+`lastWake = now` (the timestamp taken on entry). It runs only while the active preset is the
+predefined Automatic one and the machine is on battery, i.e. at most once per ~10 s.
+
+### 3.8 Sleep / wake
+
+* `slotEnteringSleepMode` `FUN_0044d100`: `sleepMode = 1`; log `slotEnteringSleepMode`. Nothing
+  else — the control thread notices the flag on its next pass (≤ 1.5 s later).
+* `slotWakeUp` `FUN_0044d5d0`: `sleepMode = 0`; log `slotWakeUp`; `wakeup.set()`.
+* `getProfileToApplyForSleepMode` `FUN_0044a5c0`: result = copy of predefined Automatic.
+  Two function-statics: `noSleepProfile = FUN_004b26c0(model)`, `forceMin = FUN_004b2760(model)`
+  (the iMac list of §3.4). If `!noSleepProfile`: for each fan i, with
+  `m = currentProfile valid ? currentProfile.mode(i) : Invalid`: if `m.type == 4` **or**
+  `forceMin` → log `getProfileToApplyForSleepMode: set min rpm for the {} fan` and
+  `result.mode[i] = Constant(fan[i].minRpm)`.
+  `FUN_004b26c0` = MacBookAir with num 81, or MacBookPro with num ∈
+  {121, 131, 132, 141, 142, 152, 162, 163} or num ≥ 171.
+  Net effect on sleep: sensor-controlled fans (all fans on the listed iMacs) are pinned to their
+  minimum RPM, constant-RPM fans are released to Automatic, and the user's profile is re-applied
+  on wake (mode mask only; constants are then rewritten by the normal loop because the measured
+  RPM differs by > 30 — `changedFlag` is not set by this path).
+
+### 3.9 Sensor reload pause — `FUN_0044d2b0`
+
+While `pausedCount != 0`: `sleep_for(10 ms)` and `qDebug() << "wait!"`. Then `resume.reset()`,
+`pause.set()`, `pauseAck.wait(INFINITE)`; emit signal #5 (`FUN_004c8c10`),
+`sensorProvider->clear()`, `sensorProvider->load()`, emit signal #6 (`FUN_004c8c30`); finally
+`pause.reset()`, `pauseAck.reset()`, `resume.set()`. Both worker threads park in
+`resume.wait(INFINITE)` meanwhile; `pauseAck` is set when the number of parked threads equals
+1 + (control thread running ? 1 : 0).
+
+---------------------------------------------------------------------------------------------------
+
+## 7. CPU-usage thread — `FUN_0044a0e0` (thread name `cpuUsageThread`)
+
+Body: `SetThreadPriority(GetCurrentThread(), -2)` (`FUN_0059fb20`); then loop:
+`v = provider->vfunc1()` (u8; provider pointer is `*(app+0x48)`); if `v != cpuUsage`
+(member +0x3b3, initial 0xFF) → store it and emit signal #0 `cpuUsageUpdated(uchar)`
+(`FUN_004c8800`); `stop.wait(1000 ms)`; exit when `stop` is set. Period 1000 ms.
+
+In this Windows build the thread is dead code:
+
+* no call, jump, thunk or function-pointer immediate references `FUN_0044a0e0` (whole `.text`
+  scanned for E8/E9 rel32 and for the absolute address), and `m_ThreadCpuUsage` (+0x30) is only
+  ever read (in `stopAndWaitForFinished`);
+* the only consumer of `cpuUsageUpdated` is the main-window slot `cpuUsageUpdate`
+  `FUN_004634d0`, whose body is an empty `return`;
+* the import table has no `GetSystemTimes` / PDH / `NtQuerySystemInformation`.
+
+UNKNOWN: what the provider at `app+0x48` would measure (its vtable was not located). A
+reimplementation can omit the thread; the log line in `stopAndWaitForFinished` always reports
+`m_ThreadCpuUsage = false`.
+
