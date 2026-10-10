@@ -5,6 +5,7 @@ use crate::lang::Language;
 use crate::settings::Store;
 
 pub const APP_NAME: &str = "Rusty Macs Fan Control";
+pub const PROJECT_URL: &str = "https://github.com/thesupersupersigma/RustyMacsFanControl";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn app_title() -> String {

@@ -233,9 +233,6 @@ fn show_menu(window: &MainWindow) -> Option<Action> {
     more.item(lang.get("MainWindow/buttonAbout"), Action::About, false);
     more.item(lang.get("TrayMenu/itemTechInfoZip"), Action::TechZip, false);
     more.separator();
-    more.item(lang.get("TrayMenu/itemRateApp"), Action::RateApp, false);
-    more.item(lang.get("TrayMenu/itemFollowTwitter"), Action::Twitter, false);
-    more.separator();
     more.item(lang.get("TrayMenu/itemWebsite"), Action::Website, false);
     menu.submenu(lang.get("TrayMenu/itemMoreLinks"), more, false);
     menu.separator();

@@ -159,7 +159,7 @@ fn main() {
     if !has("/skipcheck") && !demo {
         if is_virtual_machine() {
             if !settings::Store::get_bool(&store, "NoVmWarning", false) {
-                message_box("Virtual machine detected\n\nUnable to start Macs Fan Control in a virtual machine.");
+                message_box("Virtual machine detected\n\nUnable to start in a virtual machine.");
             }
             return;
         }

@@ -105,8 +105,6 @@ pub enum Action {
     Preferences,
     About,
     TechZip,
-    RateApp,
-    Twitter,
     Website,
     Exit,
 }
@@ -976,12 +974,7 @@ impl MainWindow {
             Action::Preferences => super::preferences::show(self),
             Action::About => super::dialogs::about(self),
             Action::TechZip => self.info(&text::app_title(), "Technical info export is not available yet."),
-            Action::RateApp => {
-                store.set_bool("RateOnMacupdateSkip", true);
-                self.open_url("https://www.macupdate.com/app/mac/47386/macs-fan-control");
-            }
-            Action::Twitter => self.open_url("https://twitter.com/crystalidea"),
-            Action::Website => self.open_url("https://crystalidea.com/macs-fan-control"),
+            Action::Website => self.open_url(text::PROJECT_URL),
             Action::Exit => {
                 self.quit();
                 return;

@@ -30,20 +30,30 @@ jobs:
         run: |
           Invoke-WebRequest https://crystalidea.com/downloads/macsfancontrol_setup.exe -OutFile setup.exe
           $target = Join-Path $PWD original
-          $setup = Start-Process ./setup.exe -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$target`""
-          # After copying its files the installer starts the app, which stops at an
-          # "unsupported hardware" message on a build machine and never returns. The files
-          # are complete by then, so wait for either and then end both.
+          $setup = Start-Process ./setup.exe -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=`"$PWD\install.log`"", "/DIR=`"$target`""
+          # The installer does not return on a build machine (after copying its files it
+          # starts the app, which has no Mac to talk to). Only the unpacked executable is
+          # needed, so continue once that file is complete and end whatever is left.
+          $exe = Join-Path $target MacsFanControl.exe
           $deadline = (Get-Date).AddMinutes(4)
-          while (-not $setup.HasExited -and -not (Get-Process MacsFanControl -ErrorAction SilentlyContinue)) {
-            if ((Get-Date) -gt $deadline) { throw 'The installer did not unpack the app in time' }
-            Start-Sleep -Seconds 2
+          $lastSize = -1
+          while ($true) {
+            Start-Sleep -Seconds 5
+            $size = if (Test-Path $exe) { (Get-Item $exe).Length } else { -1 }
+            if ($size -gt 0 -and $size -eq $lastSize) { break }
+            $lastSize = $size
+            if ($setup.HasExited -and $size -le 0) { break }
+            if ((Get-Date) -gt $deadline) { break }
           }
-          Start-Sleep -Seconds 3
-          Get-Process MacsFanControl -ErrorAction SilentlyContinue | Stop-Process -Force
-          if (-not $setup.HasExited) { $setup | Stop-Process -Force }
-          Get-Process | Where-Object { $_.Path -like "$env:TEMP\is-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-          if (-not (Test-Path (Join-Path $target MacsFanControl.exe))) { throw 'MacsFanControl.exe was not installed' }
+          Get-Process MacsFanControl, AppleSMC -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process | Where-Object { $_.Path -like "$env:TEMP\is-*" -or $_.Id -eq $setup.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $exe)) {
+            Write-Host '--- installer log'
+            if (Test-Path install.log) { Get-Content install.log -Tail 60 }
+            Write-Host '--- processes with windows'
+            Get-Process | Where-Object MainWindowTitle | Format-Table Id, ProcessName, MainWindowTitle -AutoSize | Out-String | Write-Host
+            throw 'The installer did not unpack MacsFanControl.exe'
+          }
           python -I re/scripts/extract_assets.py $target app/assets
 
       - name: Test

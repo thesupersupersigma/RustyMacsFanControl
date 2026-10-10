@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+const ORIGINAL_NAME: &str = "Macs Fan Control";
 const EMBEDDED_ENGLISH: &str = include_str!("../assets/xml/English.xml");
 
 pub struct Language {
@@ -26,8 +27,13 @@ fn parse(xml: &str) -> HashMap<String, String> {
             if child.children().any(|n| n.is_element()) {
                 walk(child, &child_path, out);
             } else {
-                // The files spell line breaks as a literal backslash-n.
-                let text = child.text().unwrap_or("").replace("\\n", "\n");
+                // The files spell line breaks as a literal backslash-n, and name the
+                // original product, which this app is not.
+                let text = child
+                    .text()
+                    .unwrap_or("")
+                    .replace("\\n", "\n")
+                    .replace(ORIGINAL_NAME, crate::ui::text::APP_NAME);
                 out.insert(child_path, text);
             }
         }
@@ -80,5 +86,7 @@ mod tests {
         assert_eq!(lang.format("MainWindow/fanControlConstant", &["2000"]), "Constant value of 2000");
         assert!(lang.get("Presets/presetCreateNewMessage").contains("system. \n\nPlease"));
         assert_eq!(lang.get("No/such/key"), "");
+        assert_eq!(lang.get("TrayMenu/itemShow"), "Show Rusty Macs Fan Control");
+        assert_eq!(lang.get("AboutDialog/title"), "About Rusty Macs Fan Control");
     }
 }

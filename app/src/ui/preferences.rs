@@ -8,19 +8,18 @@ use std::rc::Rc;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::DeleteObject;
 use windows_sys::Win32::UI::Controls::{
-    ImageList_Add, ImageList_Create, CCS_NODIVIDER, ILC_COLOR32, NMHDR, NM_CLICK,
-    NM_RETURN, TBBUTTON, TBSTATE_CHECKED, TBSTATE_ENABLED, TBSTYLE_FLAT, TB_ADDBUTTONSW,
+    ImageList_Add, ImageList_Create, CCS_NODIVIDER, ILC_COLOR32, TBBUTTON, TBSTATE_CHECKED, TBSTATE_ENABLED, TBSTYLE_FLAT, TB_ADDBUTTONSW,
     TB_AUTOSIZE, TB_BUTTONSTRUCTSIZE, TB_GETMAXSIZE, TB_SETIMAGELIST,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MoveWindow, SendMessageW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
     CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, IDCANCEL,
-    SW_HIDE, SW_SHOW, WM_COMMAND, WM_NOTIFY, WS_TABSTOP,
+    SW_HIDE, SW_SHOW, WM_COMMAND, WS_TABSTOP,
     WS_VSCROLL,
 };
 
-use super::dialogs::{close, create, open_url, place, resize, run_modal};
+use super::dialogs::{close, create, place, resize, run_modal};
 use super::main_window::MainWindow;
 use super::win::{
     self, control, px, wide, BTNS_CHECKGROUP, SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_RIGHT,
@@ -31,7 +30,6 @@ use crate::lang::Language;
 const ID_PAGE_FIRST: i32 = 100;
 const ID_AUTOSTART: i32 = 10;
 const ID_LANGUAGE: i32 = 11;
-const ID_TRANSLATE: i32 = 12;
 const ID_DRIVES: i32 = 20;
 const ID_DRIVES_EXTERNAL: i32 = 21;
 const ID_EGPU: i32 = 22;
@@ -174,9 +172,7 @@ pub fn show(window: &MainWindow) {
             send(language_combo, CB_SETCURSEL, index, 0);
         }
     }
-    let translate = control(dialog, "SysLink", "<a href=\"translate\">Translate</a>", WS_TABSTOP, 0, ID_TRANSLATE, font);
-    place(translate, left + 86 + 216, top + 33, 60, 16);
-    let general = vec![autostart_box, language_label, language_combo, translate];
+    let general = vec![autostart_box, language_label, language_combo];
 
     // T° Sensors.
     let sensors_label = control(dialog, "STATIC", &tr("PreferencesWindow/labelSensors"), 0, 0, 0, font);
@@ -257,20 +253,10 @@ pub fn show(window: &MainWindow) {
     run_modal(
         owner,
         dialog,
-        Box::new(move |hwnd, message, wparam, lparam| {
+        Box::new(move |hwnd, message, wparam, _| {
             // The main window outlives this modal loop.
             let window = unsafe { &*window_ptr };
             match message {
-                WM_NOTIFY => {
-                    let header = unsafe { &*(lparam as *const NMHDR) };
-                    if header.idFrom as i32 == ID_TRANSLATE
-                        && (header.code == NM_CLICK || header.code == NM_RETURN)
-                    {
-                        open_url(hwnd, "https://crystalidea.com/macs-fan-control-translation");
-                        return Some(0);
-                    }
-                    None
-                }
                 WM_COMMAND => {
                     let (id, code) = (win::lo_word(wparam) as i32, win::hi_word(wparam));
                     match id {

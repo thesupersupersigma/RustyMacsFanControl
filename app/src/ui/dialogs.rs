@@ -345,7 +345,7 @@ pub fn about(window: &MainWindow) {
                 let header = unsafe { &*(lparam as *const NMHDR) };
                 if header.idFrom == 20 && (header.code == NM_CLICK || header.code == NM_RETURN) {
                     let _ = unsafe { &*(lparam as *const NMLINK) };
-                    open_url(hwnd, "https://crystalidea.com/macs-fan-control/support");
+                    open_url(hwnd, text::PROJECT_URL);
                     return Some(0);
                 }
                 None
