@@ -303,7 +303,7 @@ pub fn about(window: &MainWindow) {
     let note = control(
         dialog,
         "STATIC",
-        "Independent Rust reimplementation of Macs Fan Control",
+        "Rust reimplementation of Macs Fan Control",
         SS_CENTER,
         0,
         0,
