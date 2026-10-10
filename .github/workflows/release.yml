@@ -24,37 +24,19 @@ jobs:
           }
 
       # The icons, sensor tables and English strings come from the original app and are
-      # not stored in this repository, so they are taken from its official installer.
-      - name: Extract resources from the original app
+      # not stored in this repository. A zip of them is downloaded from the address in
+      # the ASSETS_URL repository secret; re/scripts/extract_assets.py produces its
+      # contents from an installed copy of the original.
+      - name: Fetch resources
         shell: pwsh
+        env:
+          ASSETS_URL: ${{ secrets.ASSETS_URL }}
         run: |
-          Invoke-WebRequest https://crystalidea.com/downloads/macsfancontrol_setup.exe -OutFile setup.exe
-          $target = Join-Path $PWD original
-          $setup = Start-Process ./setup.exe -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=`"$PWD\install.log`"", "/DIR=`"$target`""
-          # The installer does not return on a build machine (after copying its files it
-          # starts the app, which has no Mac to talk to). Only the unpacked executable is
-          # needed, so continue once that file is complete and end whatever is left.
-          $exe = Join-Path $target MacsFanControl.exe
-          $deadline = (Get-Date).AddMinutes(4)
-          $lastSize = -1
-          while ($true) {
-            Start-Sleep -Seconds 5
-            $size = if (Test-Path $exe) { (Get-Item $exe).Length } else { -1 }
-            if ($size -gt 0 -and $size -eq $lastSize) { break }
-            $lastSize = $size
-            if ($setup.HasExited -and $size -le 0) { break }
-            if ((Get-Date) -gt $deadline) { break }
-          }
-          Get-Process MacsFanControl, AppleSMC -ErrorAction SilentlyContinue | Stop-Process -Force
-          Get-Process | Where-Object { $_.Path -like "$env:TEMP\is-*" -or $_.Id -eq $setup.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
-          if (-not (Test-Path $exe)) {
-            Write-Host '--- installer log'
-            if (Test-Path install.log) { Get-Content install.log -Tail 60 }
-            Write-Host '--- processes with windows'
-            Get-Process | Where-Object MainWindowTitle | Format-Table Id, ProcessName, MainWindowTitle -AutoSize | Out-String | Write-Host
-            throw 'The installer did not unpack MacsFanControl.exe'
-          }
-          python -I re/scripts/extract_assets.py $target app/assets
+          if (-not $env:ASSETS_URL) { throw 'The ASSETS_URL repository secret is not set' }
+          Invoke-WebRequest $env:ASSETS_URL -OutFile assets.zip
+          $hash = (Get-FileHash assets.zip -Algorithm SHA256).Hash
+          if ($hash -ne 'EA3BD85436132CEB2E8111C5A5665554860367A390E3F84DDAE53B1E21598A85') { throw "assets.zip has an unexpected SHA-256: $hash" }
+          Expand-Archive assets.zip -DestinationPath app/assets
 
       - name: Test
         run: cargo test --manifest-path app/Cargo.toml

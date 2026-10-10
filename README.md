@@ -100,8 +100,10 @@ enough for working on the interface.
 ### Releases
 
 Pushing a tag such as `v0.2.0` runs `.github/workflows/release.yml`. It checks that the tag
-matches the version in `app/Cargo.toml`, takes the resources from the official installer,
-runs the tests, builds the release executable and attaches it to a GitHub release.
+matches the version in `app/Cargo.toml`, downloads a zip of the `app/assets` folder from the
+address stored in the `ASSETS_URL` repository secret, runs the tests, builds the release
+executable and attaches it to a GitHub release. The workflow pins the zip's SHA-256, so
+update that value in the workflow whenever the zip changes.
 
 ## Repository layout
 
