@@ -910,6 +910,7 @@ impl MainWindow {
     }
 
     pub fn perform(&self, action: Action) {
+        crate::info!("User action: {action:?}");
         let store = self.store();
         let custom_profile = |index: usize| -> Option<Profile> {
             self.engine.borrow().core().profiles.custom.get(index).cloned()

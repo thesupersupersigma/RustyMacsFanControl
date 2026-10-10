@@ -31,8 +31,19 @@ jobs:
           Invoke-WebRequest https://crystalidea.com/downloads/macsfancontrol_setup.exe -OutFile setup.exe
           $target = Join-Path $PWD original
           $setup = Start-Process ./setup.exe -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$target`""
-          if (-not $setup.WaitForExit(300000)) { throw 'The installer did not finish' }
+          # After copying its files the installer starts the app, which stops at an
+          # "unsupported hardware" message on a build machine and never returns. The files
+          # are complete by then, so wait for either and then end both.
+          $deadline = (Get-Date).AddMinutes(4)
+          while (-not $setup.HasExited -and -not (Get-Process MacsFanControl -ErrorAction SilentlyContinue)) {
+            if ((Get-Date) -gt $deadline) { throw 'The installer did not unpack the app in time' }
+            Start-Sleep -Seconds 2
+          }
+          Start-Sleep -Seconds 3
           Get-Process MacsFanControl -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $setup.HasExited) { $setup | Stop-Process -Force }
+          Get-Process | Where-Object { $_.Path -like "$env:TEMP\is-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path (Join-Path $target MacsFanControl.exe))) { throw 'MacsFanControl.exe was not installed' }
           python -I re/scripts/extract_assets.py $target app/assets
 
       - name: Test

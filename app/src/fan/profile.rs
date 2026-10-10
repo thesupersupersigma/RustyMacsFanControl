@@ -156,6 +156,7 @@ impl ProfileList {
 
         let mut candidate = self.automatic.clone();
         let active = store.get_string("ActivePreset").unwrap_or_default();
+        crate::info!("Saved active preset: '{active}'");
         if active.is_empty() {
             if let Some(legacy) = self.legacy_profile(store, sensor_exists) {
                 candidate = legacy;
