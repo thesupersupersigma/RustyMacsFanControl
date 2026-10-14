@@ -6,9 +6,11 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfigW, CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW,
+    ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, OpenSCManagerW,
+    OpenServiceW,
     QueryServiceConfigW, QueryServiceStatus, StartServiceW, QUERY_SERVICE_CONFIGW, SC_HANDLE,
     SC_MANAGER_ALL_ACCESS, SERVICES_ACTIVE_DATABASEW, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_ERROR_NORMAL, SERVICE_KERNEL_DRIVER,
     SERVICE_CONTROL_STOP, SERVICE_DEMAND_START, SERVICE_DISABLED, SERVICE_NO_CHANGE,
     SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STOPPED, SERVICE_STOP_PENDING,
 };
@@ -23,7 +25,8 @@ pub struct WinService {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartResult {
-    Failed,
+    /// With the Windows error code.
+    Failed(u32),
     StopPending,
     TimedOut,
     Started,
@@ -51,6 +54,37 @@ impl WinService {
             return None;
         }
         Some(WinService { manager, handle, name: name.to_string() })
+    }
+
+    /// Registers a demand-start kernel driver service; returns the Windows error on failure.
+    pub fn create_kernel_driver(name: &str, display_name: &str, path: &str) -> Result<(), u32> {
+        unsafe {
+            let manager = OpenSCManagerW(null(), null(), SC_MANAGER_ALL_ACCESS);
+            if manager.is_null() {
+                return Err(GetLastError());
+            }
+            let handle = CreateServiceW(
+                manager,
+                wide(name).as_ptr(),
+                wide(display_name).as_ptr(),
+                SERVICE_ALL_ACCESS,
+                SERVICE_KERNEL_DRIVER,
+                SERVICE_DEMAND_START,
+                SERVICE_ERROR_NORMAL,
+                wide(path).as_ptr(),
+                null(),
+                null_mut(),
+                null(),
+                null(),
+                null(),
+            );
+            let result = if handle.is_null() { Err(GetLastError()) } else { Ok(()) };
+            if !handle.is_null() {
+                CloseServiceHandle(handle);
+            }
+            CloseServiceHandle(manager);
+            result
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -123,11 +157,12 @@ impl WinService {
             _ => {}
         }
         if unsafe { StartServiceW(self.handle, 0, null()) } == 0 {
-            crate::error!("StartService failed with error {}", unsafe { GetLastError() });
-            return StartResult::Failed;
+            let error = unsafe { GetLastError() };
+            crate::error!("StartService failed with error {error}");
+            return StartResult::Failed(error);
         }
         if timeout_ms == 0 {
-            return StartResult::Failed;
+            return StartResult::Failed(0);
         }
         if self.wait_for_state(SERVICE_RUNNING, timeout_ms) {
             StartResult::Started

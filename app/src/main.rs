@@ -39,9 +39,12 @@ fn probe() {
         model.number,
         model.is_t2()
     );
-    let Some(provider) = platform::open(&model, Options::default()) else {
-        println!("Could not open the SMC (run elevated; the AppleSMC driver service must exist).");
-        return;
+    let provider = match platform::open(&model, Options::default()) {
+        Ok(provider) => provider,
+        Err(reason) => {
+            println!("Could not open the SMC: {reason}");
+            return;
+        }
     };
     let service = Service::new(provider, &model);
     println!("Provider: {}, {} SMC keys", service.provider_name(), service.key_count());
@@ -101,10 +104,10 @@ fn already_running() -> bool {
     }
 }
 
-fn open_provider(model: &Model, options: Options, demo: bool) -> Option<Box<dyn Provider>> {
+fn open_provider(model: &Model, options: Options, demo: bool) -> Result<Box<dyn Provider>, String> {
     #[cfg(debug_assertions)]
     if demo {
-        return Some(Box::new(smc::fake::demo()));
+        return Ok(Box::new(smc::fake::demo()));
     }
     let _ = demo;
     platform::open(model, options)
@@ -172,11 +175,17 @@ fn main() {
     }
 
     let options = Options { force_apple_smc: has("/applesmc") };
-    let Some(provider) = open_provider(&model, options, demo) else {
-        message_box(
-            "Error initializing SMC interaction layer\n\nPlease make sure that your Mac system is supported and you have correctly installed the program.",
-        );
-        return;
+    let provider = match open_provider(&model, options, demo) {
+        Ok(provider) => provider,
+        Err(reason) => {
+            error!("{reason}");
+            message_box(&format!(
+                "Error initializing SMC interaction layer\n\n{reason}\n\nMac model: {}\nLog: {}",
+                if model.name.is_empty() { "unknown" } else { &model.name },
+                log_path.display()
+            ));
+            return;
+        }
     };
     let service = Arc::new(Service::new(provider, &model));
     let language_file = settings::Store::get_string(&store, "InterfaceLanguage").unwrap_or_default();

@@ -1,5 +1,6 @@
 //! Transports that carry SMC key requests to the hardware.
 
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -12,7 +13,9 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use crate::model::Model;
 use crate::registry::wide;
-use crate::win_service::WinService;
+use crate::win_service::{StartResult, WinService};
+
+const ORIGINAL_DOWNLOAD: &str = "https://crystalidea.com/macs-fan-control";
 
 /// Four ASCII characters in string order, exactly as they go on the wire.
 pub type Key = [u8; 4];
@@ -112,30 +115,37 @@ pub struct AppleSmc {
 }
 
 impl AppleSmc {
-    pub fn open() -> Option<AppleSmc> {
+    pub fn open() -> Result<AppleSmc, String> {
         crate::info!("Connecting using our driver...");
-        let service = WinService::open(APPLESMC_SERVICE)?;
-        if !service.start(500).is_running() {
-            crate::error!("Failed to start service {}, error {}", service.name(), unsafe {
-                GetLastError()
-            });
-            service.stop();
-            return None;
+        let service = WinService::open(APPLESMC_SERVICE)
+            .ok_or_else(|| "The AppleSMC driver service could not be opened.".to_string())?;
+        match service.start(500) {
+            result if result.is_running() => {}
+            result => {
+                let error = match result {
+                    StartResult::Failed(error) => error,
+                    _ => 0,
+                };
+                crate::error!("Failed to start service {}, error {error}", service.name());
+                service.stop();
+                return Err(start_failure_message(error));
+            }
         }
         let path = r"\\.\APPLESMC";
         let Some(device) =
             Device::open(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE)
         else {
-            crate::error!("Create file failed to open {path}, error {}", unsafe { GetLastError() });
+            let error = unsafe { GetLastError() };
+            crate::error!("Create file failed to open {path}, error {error}");
             service.stop();
-            return None;
+            return Err(format!("The AppleSMC driver is running but could not be opened (Windows error {error})."));
         };
         let mut protocol = [0xFFu8];
         match device.ioctl(IOCTL_APPLESMC_GET_PROTOCOL, &[], &mut protocol) {
             Some(_) => crate::info!("Connected, protocol is {}", protocol[0]),
             None => crate::warn!("GetProtocol failed, error {}", unsafe { GetLastError() }),
         }
-        Some(AppleSmc { device })
+        Ok(AppleSmc { device })
     }
 
     fn log_failure(&self) {
@@ -307,11 +317,57 @@ impl Provider for BootCamp {
     }
 }
 
-fn try_apple_smc() -> Option<Box<dyn Provider>> {
-    let Some(service) = WinService::open(APPLESMC_SERVICE) else {
-        crate::error!("AppleSMC service cannot be opened");
-        return None;
+/// Where the original app's installer puts `applesmc.sys`, plus next to this exe.
+fn driver_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) {
+        candidates.push(dir.join("applesmc.sys"));
+    }
+    for program_files in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(dir) = std::env::var(program_files) {
+            candidates.push(PathBuf::from(dir).join("Macs Fan Control").join("applesmc.sys"));
+        }
+    }
+    candidates
+}
+
+/// Registers the AppleSMC driver service from an existing `applesmc.sys`, as the
+/// original's installer does.
+fn install_driver_service() -> Result<(), String> {
+    let Some(driver) = driver_candidates().into_iter().find(|path| path.is_file()) else {
+        return Err(format!(
+            "The AppleSMC driver is not installed. This app uses the signed driver that comes \
+             with the original Macs Fan Control, so install that first ({ORIGINAL_DOWNLOAD}). \
+             It does not need to be running."
+        ));
     };
+    let path = driver.to_string_lossy().into_owned();
+    crate::info!("Registering the {APPLESMC_SERVICE} service for {path}");
+    WinService::create_kernel_driver(APPLESMC_SERVICE, "Apple SMC service", &path).map_err(|error| {
+        crate::error!("CreateService failed with error {error}");
+        format!("The AppleSMC driver service could not be registered (Windows error {error}).")
+    })
+}
+
+fn start_failure_message(error: u32) -> String {
+    match error {
+        // ERROR_INVALID_IMAGE_HASH, ERROR_DRIVER_BLOCKED
+        577 | 1275 => format!(
+            "Windows refused to load the AppleSMC driver (Windows error {error}). This usually \
+             means Memory Integrity is on: Windows Security > Device security > Core isolation."
+        ),
+        0 => "The AppleSMC driver did not start in time.".to_string(),
+        _ => format!("The AppleSMC driver could not be started (Windows error {error})."),
+    }
+}
+
+fn try_apple_smc() -> Result<Box<dyn Provider>, String> {
+    if WinService::open(APPLESMC_SERVICE).is_none() {
+        crate::warn!("AppleSMC service cannot be opened");
+        install_driver_service()?;
+    }
+    let service = WinService::open(APPLESMC_SERVICE)
+        .ok_or_else(|| "The AppleSMC driver service could not be opened.".to_string())?;
     if !service.is_enabled() {
         crate::warn!("AppleSMC service is not enabled");
         service.set_demand_start();
@@ -351,12 +407,13 @@ fn is_windows_11() -> bool {
 }
 
 /// Picks the transport the way the original does: T2 Macs, Windows 11 and `/applesmc`
-/// use the applesmc driver alone; everything else prefers Boot Camp's driver.
-pub fn open(model: &Model, options: Options) -> Option<Box<dyn Provider>> {
+/// use the applesmc driver alone; everything else prefers Boot Camp's driver. The error
+/// explains why no transport could be opened.
+pub fn open(model: &Model, options: Options) -> Result<Box<dyn Provider>, String> {
     if is_windows_11() || model.is_t2() || options.force_apple_smc {
         try_apple_smc()
     } else {
-        try_boot_camp().or_else(try_apple_smc)
+        try_boot_camp().ok_or(()).or_else(|_| try_apple_smc())
     }
 }
 

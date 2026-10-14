@@ -35,6 +35,21 @@ Download the zip from the [Releases](../../releases) page, unpack it anywhere an
 The executable is not code signed, so the elevation prompt shows an unknown publisher and
 SmartScreen may warn the first time.
 
+## Troubleshooting
+
+**"Error initializing SMC interaction layer"** means the app could not reach the SMC. The
+message now says why; the usual causes are:
+
+- *The AppleSMC driver is not installed.* Install the original Macs Fan Control first. Its
+  installer provides the signed `applesmc.sys` driver. If the driver file is present but its
+  service is missing, this app registers the service itself.
+- *Windows refused to load the driver* (error 577 or 1275). Memory Integrity blocks it; it
+  is under Windows Security > Device security > Core isolation.
+- *Not a Mac,* or Windows running in a virtual machine.
+
+The log named in the message (`%TEMP%\RustyMacsFanControl.log`) has the details; please
+attach it when opening an issue.
+
 ## Using it
 
 - **Main window.** Fans are on the left with their minimum, current and maximum RPM.
