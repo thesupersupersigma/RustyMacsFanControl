@@ -128,6 +128,25 @@ fn initial_action(args: &[String]) -> Option<ui::main_window::Action> {
     }
 }
 
+/// `/uninstall`: removes what this app set up outside its folder. The driver service is
+/// only removed when it loads the copy bundled with this app, so an installed original
+/// Macs Fan Control keeps working.
+fn uninstall() {
+    autostart::set_enabled(false);
+    if let Some(service) = win_service::WinService::open("AppleSMC") {
+        let ours = platform::bundled_driver().is_some_and(|bundled| {
+            service.binary_path().is_some_and(|path| {
+                std::path::Path::new(&path).to_string_lossy().eq_ignore_ascii_case(&bundled.to_string_lossy())
+            })
+        });
+        if ours {
+            service.stop();
+            service.delete();
+            info!("Removed the AppleSMC driver service");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |switch: &str| args.iter().any(|arg| arg == switch);
@@ -146,6 +165,10 @@ fn main() {
     }
     info!("{}", ui::text::app_title());
 
+    if has("/uninstall") {
+        uninstall();
+        return;
+    }
     if already_running() {
         return;
     }

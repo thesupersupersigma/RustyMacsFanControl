@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, OpenSCManagerW,
+    ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
+    OpenSCManagerW,
     OpenServiceW,
     QueryServiceConfigW, QueryServiceStatus, StartServiceW, QUERY_SERVICE_CONFIGW, SC_HANDLE,
     SC_MANAGER_ALL_ACCESS, SERVICES_ACTIVE_DATABASEW, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
@@ -97,22 +98,68 @@ impl WinService {
             .then_some(status.dwCurrentState)
     }
 
-    /// A service counts as enabled unless it is auto-start or disabled; a failed query
-    /// counts as not enabled.
-    pub fn is_enabled(&self) -> bool {
+    /// Start type and binary path as registered.
+    fn config(&self) -> Option<(u32, String)> {
         let mut needed = 0u32;
         unsafe { QueryServiceConfigW(self.handle, null_mut(), 0, &mut needed) };
         if needed == 0 {
-            return false;
+            return None;
         }
         // u64 storage keeps the buffer aligned for QUERY_SERVICE_CONFIGW.
         let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
         let config = buf.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>();
         if unsafe { QueryServiceConfigW(self.handle, config, needed, &mut needed) } == 0 {
-            return false;
+            return None;
         }
-        let start_type = unsafe { (*config).dwStartType };
-        start_type != SERVICE_AUTO_START && start_type != SERVICE_DISABLED
+        unsafe {
+            let path_ptr = (*config).lpBinaryPathName;
+            let mut len = 0;
+            while !path_ptr.is_null() && *path_ptr.add(len) != 0 {
+                len += 1;
+            }
+            let path = if path_ptr.is_null() {
+                String::new()
+            } else {
+                String::from_utf16_lossy(std::slice::from_raw_parts(path_ptr, len))
+            };
+            Some(((*config).dwStartType, path))
+        }
+    }
+
+    /// A service counts as enabled unless it is auto-start or disabled; a failed query
+    /// counts as not enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.config().is_some_and(|(start_type, _)| {
+            start_type != SERVICE_AUTO_START && start_type != SERVICE_DISABLED
+        })
+    }
+
+    /// The driver file the service loads, without the `\??\` prefix the SCM adds.
+    pub fn binary_path(&self) -> Option<String> {
+        self.config().map(|(_, path)| path.trim_start_matches(r"\??\").to_string())
+    }
+
+    pub fn set_binary_path(&self, path: &str) -> bool {
+        unsafe {
+            ChangeServiceConfigW(
+                self.handle,
+                SERVICE_NO_CHANGE,
+                SERVICE_NO_CHANGE,
+                SERVICE_NO_CHANGE,
+                wide(path).as_ptr(),
+                null(),
+                null_mut(),
+                null(),
+                null(),
+                null(),
+                null(),
+            ) != 0
+        }
+    }
+
+    /// Marks the service for deletion; it goes once stopped and every handle is closed.
+    pub fn delete(&self) -> bool {
+        unsafe { DeleteService(self.handle) != 0 }
     }
 
     pub fn is_started(&self) -> bool {

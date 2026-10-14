@@ -18,19 +18,30 @@ product.
 ## Requirements
 
 - An Intel Mac running Windows 10 or 11 (64-bit) through Boot Camp.
-- The original Macs Fan Control installed. This app does not ship a kernel driver; it uses
-  the signed `applesmc.sys` driver that the original's installer registers as the
-  `AppleSMC` service. Language files are also read from the original's install folder.
-- Administrator rights. Starting the driver needs them, so Windows asks for elevation each
-  time the app starts.
+- Administrator rights. Starting the SMC driver needs them, so Windows asks for elevation
+  each time the app starts.
 
-Do not run this app and the original at the same time. They share settings and would both
-try to control the fans.
+The original Macs Fan Control does not need to be installed. If it is, leave it installed
+but do not run both apps at the same time: they share settings and would both try to
+control the fans. Languages other than English are read from the original's install folder
+when it is present.
+
+### The driver
+
+The SMC is reached through `applesmc.sys`, the signed kernel driver written by CrystalBit
+Solutions for the original app. The release zip includes a copy, which must stay in the
+same folder as the exe. On first start the app registers it as the `AppleSMC` driver
+service (on demand, not at boot), unless that service already exists from an installed
+original. It is started while the app runs and stopped when it exits.
 
 ## Install
 
-Download the zip from the [Releases](../../releases) page, unpack it anywhere and run
-`RustyMacsFanControl.exe`.
+Download the zip from the [Releases](../../releases) page, unpack it to a permanent folder
+and run `RustyMacsFanControl.exe`. Keep `applesmc.sys` next to it.
+
+To remove the app, run `RustyMacsFanControl.exe /uninstall` from an administrator prompt
+(this removes the autostart task and the driver service it registered), then delete the
+folder.
 
 The executable is not code signed, so the elevation prompt shows an unknown publisher and
 SmartScreen may warn the first time.
@@ -40,9 +51,8 @@ SmartScreen may warn the first time.
 **"Error initializing SMC interaction layer"** means the app could not reach the SMC. The
 message now says why; the usual causes are:
 
-- *The AppleSMC driver is not installed.* Install the original Macs Fan Control first. Its
-  installer provides the signed `applesmc.sys` driver. If the driver file is present but its
-  service is missing, this app registers the service itself.
+- *The driver file was not found.* `applesmc.sys` must be in the same folder as the exe.
+  Unpack the whole release zip, not just the exe.
 - *Windows refused to load the driver* (error 577 or 1275). Memory Integrity blocks it; it
   is under Windows Security > Device security > Core isolation.
 - *Not a Mac,* or Windows running in a virtual machine.
@@ -76,6 +86,7 @@ is applied again the next time the app starts.
 | `/log` | Write the log next to the executable instead of `%TEMP%\RustyMacsFanControl.log`. |
 | `/applesmc` | Use the `applesmc.sys` driver even on Macs where Boot Camp's driver would be tried first. |
 | `/skipcheck` | Skip the Apple-hardware and virtual-machine checks. |
+| `/uninstall` | Remove the autostart task and the driver service this app registered, then exit. |
 | `--probe` | Print the fans and temperatures the SMC reports, then exit. Read-only. |
 
 ## What is missing compared with the original
@@ -116,9 +127,10 @@ enough for working on the interface.
 
 Pushing a tag such as `v0.2.0` runs `.github/workflows/release.yml`. It checks that the tag
 matches the version in `app/Cargo.toml`, downloads a zip of the `app/assets` folder from the
-address stored in the `ASSETS_URL` repository secret, runs the tests, builds the release
-executable and attaches it to a GitHub release. The workflow pins the zip's SHA-256, so
-update that value in the workflow whenever the zip changes.
+address stored in the `ASSETS_URL` repository secret and `applesmc.sys` from `DRIVER_URL`,
+runs the tests, builds the release executable and attaches it with the driver to a GitHub
+release. The workflow pins the SHA-256 of both files and checks the driver's signature, so
+update those values in the workflow whenever the files change.
 
 ## Repository layout
 

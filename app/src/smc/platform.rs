@@ -1,6 +1,6 @@
 //! Transports that carry SMC key requests to the hardware.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -317,12 +317,14 @@ impl Provider for BootCamp {
     }
 }
 
-/// Where the original app's installer puts `applesmc.sys`, plus next to this exe.
+/// The copy of `applesmc.sys` shipped next to this exe.
+pub fn bundled_driver() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("applesmc.sys")))
+}
+
+/// The bundled driver first, then where the original app's installer puts it.
 fn driver_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) {
-        candidates.push(dir.join("applesmc.sys"));
-    }
+    let mut candidates: Vec<PathBuf> = bundled_driver().into_iter().collect();
     for program_files in ["ProgramFiles(x86)", "ProgramFiles"] {
         if let Ok(dir) = std::env::var(program_files) {
             candidates.push(PathBuf::from(dir).join("Macs Fan Control").join("applesmc.sys"));
@@ -336,9 +338,9 @@ fn driver_candidates() -> Vec<PathBuf> {
 fn install_driver_service() -> Result<(), String> {
     let Some(driver) = driver_candidates().into_iter().find(|path| path.is_file()) else {
         return Err(format!(
-            "The AppleSMC driver is not installed. This app uses the signed driver that comes \
-             with the original Macs Fan Control, so install that first ({ORIGINAL_DOWNLOAD}). \
-             It does not need to be running."
+            "The AppleSMC driver (applesmc.sys) was not found. Keep it in the same folder as \
+             this program, as it comes in the release zip, or install the original Macs Fan \
+             Control ({ORIGINAL_DOWNLOAD}), which provides it."
         ));
     };
     let path = driver.to_string_lossy().into_owned();
@@ -372,6 +374,15 @@ fn try_apple_smc() -> Result<Box<dyn Provider>, String> {
         crate::warn!("AppleSMC service is not enabled");
         service.set_demand_start();
     }
+    // The registered driver file may have gone with a moved or deleted folder.
+    if !service.is_started() && service.binary_path().is_some_and(|path| !Path::new(&path).is_file()) {
+        if let Some(driver) = driver_candidates().into_iter().find(|path| path.is_file()) {
+            let path = driver.to_string_lossy().into_owned();
+            crate::warn!("AppleSMC driver file is missing, pointing the service at {path}");
+            service.set_binary_path(&path);
+        }
+    }
+    drop(service);
     crate::info!("Trying PlatformWinProviderAppleSmc");
     AppleSmc::open().map(|p| Box::new(p) as Box<dyn Provider>)
 }
